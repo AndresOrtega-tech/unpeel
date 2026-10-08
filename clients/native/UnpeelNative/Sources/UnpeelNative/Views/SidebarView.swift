@@ -1119,6 +1119,7 @@ extension SessionRowView: @MainActor Equatable {
             && lhs.paneItems == rhs.paneItems
             && lhs.ageTimestampMs == rhs.ageTimestampMs
             && lhs.moveTargets == rhs.moveTargets
+            && lhs.agentAccessRole == rhs.agentAccessRole
             && (lhs.onMoveToProjectSidebar == nil) == (rhs.onMoveToProjectSidebar == nil)
             && (lhs.onMoveToMainArea == nil) == (rhs.onMoveToMainArea == nil)
     }
@@ -1734,6 +1735,10 @@ struct ProjectNodeView: View {
             onCopyTranscript: {
                 store.copyTranscriptMarkdown($0, entries: $1)
             },
+            agentAccessRole: store.canSetAgentAccess(session.id)
+                ? store.agentAccessRole(for: session.id)
+                : nil,
+            onSetAgentAccessRole: { store.setAgentAccessRole($0, for: session.id) },
             onBeginEdit: {
                 store.beginEditingSessionTitle(session.id, on: .sidebar)
             },
@@ -3025,6 +3030,10 @@ struct SessionRowView: View {
     /// host using the shared Settings ▸ Transcripts content toggles). The Int
     /// is the flyout's range pick: entry count, or 0 for the whole conversation.
     var onCopyTranscript: (String, Int) -> Void = { _, _ in }
+    /// This agent session's Agent access role (Read / Write / Create &
+    /// remove); nil hides the submenu (not an agent, or not this Mac's Host).
+    var agentAccessRole: McpRole? = nil
+    var onSetAgentAccessRole: (McpRole) -> Void = { _ in }
     var onBeginEdit: () -> Void = {}
     var onCommitRename: (String) -> Void = { _ in }
     var onEndEdit: () -> Void = {}
@@ -3306,6 +3315,9 @@ struct SessionRowView: View {
             ))
         }
         Divider()
+        if let agentAccessRole {
+            agentAccessMenu(current: agentAccessRole)
+        }
         if sessionRowShowsCopyTranscript(session: session, paneItems: paneItems) {
             copyTranscriptMenu(sessionID: session.id)
         }
@@ -3338,6 +3350,26 @@ struct SessionRowView: View {
         Button(session.isLive ? "Remove session" : "Remove from list", role: .destructive) {
             onRequestRemove()
         }
+    }
+
+    /// What this agent may do to other sessions through Unpeel's tools.
+    /// Applies live: the MCP host re-reads the role on every call.
+    private func agentAccessMenu(current: McpRole) -> some View {
+        Menu("Agent access") {
+            Picker("Agent access", selection: Binding(
+                get: { current },
+                set: { onSetAgentAccessRole($0) }
+            )) {
+                ForEach(McpRole.allCases) { role in
+                    Text(role.label).tag(role)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+            Divider()
+            Text(current.detail)
+        }
+        .help("What this agent may do to other sessions through Unpeel's tools")
     }
 
     @ViewBuilder

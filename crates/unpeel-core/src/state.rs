@@ -181,31 +181,41 @@ impl McpScope {
     }
 }
 
-/// The capability a session has on Unpeel Sessions MCP. The product exposes
-/// two roles: `Read` by default, and `Write` for creating/driving/closing
-/// sessions. `Off` is internal for unknown callers and old disabled state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+/// The capability a session has on Unpeel Sessions MCP — its *Agent access*
+/// role, set per session from the sidebar's right-click menu. `Read` is the
+/// default; `Write` lets the session send to any other session without the
+/// per-pair approval prompt; `Manage` ("Create & remove") adds starting new
+/// sessions and removing the ones it started. `Off` is internal for unknown
+/// callers and test fixtures.
+///
+/// The elevated roles persist as `send` / `manage`, never the old `write` /
+/// `orchestrator` spellings: those were written by the retired lineage model
+/// and stay inert (decode to `Read`) so a stale grant can never silently
+/// become a live one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum McpRole {
     /// No session tools at all. This is not a user-facing role anymore; it is
     /// used for unknown callers and explicit test fixtures.
     Off,
-    /// Read in-reach sessions. The default for sessions not listed in the
-    /// override map.
+    /// Read every session; writes to another session follow the app-wide
+    /// write policy. The default for sessions not listed in the override map.
     #[default]
     Read,
-    /// Read, create, write to, and close in-reach sessions.
+    /// Read, plus write to any other session without asking (unless the
+    /// app-wide policy is Never allow).
     Write,
+    /// Write, plus create sessions and remove the sessions this one created.
+    Manage,
 }
 
 impl McpRole {
-    /// Lenient parse of the persisted string form. Legacy `member` maps to
-    /// `Read`; legacy `orchestrator` maps to `Write`; legacy `off` maps back to
-    /// the default read role so old "No access" state does not leave a hidden
-    /// disabled session after the two-role migration.
+    /// Lenient parse of the persisted string form. Every legacy spelling
+    /// (`member`, `off`, `write`, `writer`, `orchestrator`) and anything
+    /// unknown maps to the default `Read`.
     pub fn from_state_str(value: &str) -> McpRole {
         match value.trim().to_ascii_lowercase().as_str() {
-            "write" | "writer" | "orchestrator" => McpRole::Write,
+            "send" => McpRole::Write,
+            "manage" => McpRole::Manage,
             _ => McpRole::Read,
         }
     }
@@ -214,8 +224,20 @@ impl McpRole {
         match self {
             McpRole::Off => "off",
             McpRole::Read => "read",
-            McpRole::Write => "write",
+            McpRole::Write => "send",
+            McpRole::Manage => "manage",
         }
+    }
+
+    /// Whether writes to other sessions skip the per-pair approval prompt.
+    pub fn writes_without_asking(self) -> bool {
+        self >= McpRole::Write
+    }
+
+    /// Whether the session may create sessions and remove the ones it
+    /// created.
+    pub fn manages_sessions(self) -> bool {
+        self == McpRole::Manage
     }
 }
 
@@ -283,8 +305,9 @@ impl<'de> Deserialize<'de> for McpGrant {
             },
         }
         Ok(match Raw::deserialize(deserializer)? {
+            // Legacy bare-string form from the retired lineage model: inert.
             Raw::Legacy(reach) => McpGrant {
-                role: McpRole::Write,
+                role: McpRole::Read,
                 reach: McpGrant::parse_reach(&reach),
             },
             Raw::Full { role, reach } => McpGrant {
@@ -1377,26 +1400,40 @@ mod tests {
         assert_eq!(McpRole::from_state_str("off"), McpRole::Read);
         assert_eq!(McpRole::from_state_str("read"), McpRole::Read);
         assert_eq!(McpRole::from_state_str("MEMBER"), McpRole::Read);
-        assert_eq!(McpRole::from_state_str("write"), McpRole::Write);
-        assert_eq!(McpRole::from_state_str("orchestrator"), McpRole::Write);
+        // Retired lineage-model spellings stay inert.
+        assert_eq!(McpRole::from_state_str("write"), McpRole::Read);
+        assert_eq!(McpRole::from_state_str("orchestrator"), McpRole::Read);
+        assert_eq!(McpRole::from_state_str("send"), McpRole::Write);
+        assert_eq!(McpRole::from_state_str(" Manage "), McpRole::Manage);
         // Unknown / garbage falls back to the default access, never silently Off.
         assert_eq!(McpRole::from_state_str("nonsense"), McpRole::Read);
         assert_eq!(McpRole::default(), McpRole::Read);
         assert_eq!(McpRole::Off.as_state_str(), "off");
         assert_eq!(McpRole::Read.as_state_str(), "read");
-        assert_eq!(McpRole::Write.as_state_str(), "write");
+        assert_eq!(McpRole::Write.as_state_str(), "send");
+        assert_eq!(McpRole::Manage.as_state_str(), "manage");
+        assert!(!McpRole::Read.writes_without_asking());
+        assert!(McpRole::Write.writes_without_asking());
+        assert!(McpRole::Manage.writes_without_asking());
+        assert!(!McpRole::Write.manages_sessions());
+        assert!(McpRole::Manage.manages_sessions());
     }
 
     #[test]
     fn mcp_grant_decodes_legacy_string_and_object_forms() {
-        // Legacy bare-string reach decodes to a Write grant, now project-bound.
+        // Legacy bare-string reach decodes to an inert Read grant.
         let legacy: McpGrant = serde_json::from_str("\"global\"").unwrap();
-        assert_eq!(legacy.role, McpRole::Write);
+        assert_eq!(legacy.role, McpRole::Read);
         assert_eq!(legacy.reach, McpScope::Project);
         assert_eq!(legacy.effective_scope(), McpScope::Project);
 
         let legacy_project: McpGrant = serde_json::from_str("\"project\"").unwrap();
-        assert_eq!(legacy_project.role, McpRole::Write);
+        assert_eq!(legacy_project.role, McpRole::Read);
+
+        // A retired lineage-model write grant never becomes a live role.
+        let stale: McpGrant =
+            serde_json::from_str(r#"{"role":"write","reach":"project"}"#).unwrap();
+        assert_eq!(stale.role, McpRole::Read);
         assert_eq!(legacy_project.reach, McpScope::Project);
 
         // New object form carries role + reach; legacy role names still decode.
@@ -1420,11 +1457,11 @@ mod tests {
     #[test]
     fn mcp_grant_serializes_to_object_form() {
         let grant = McpGrant {
-            role: McpRole::Write,
+            role: McpRole::Manage,
             reach: McpScope::Project,
         };
         let json = serde_json::to_string(&grant).unwrap();
-        assert_eq!(json, r#"{"role":"write","reach":"project"}"#);
+        assert_eq!(json, r#"{"role":"manage","reach":"project"}"#);
         // Round trips.
         let back: McpGrant = serde_json::from_str(&json).unwrap();
         assert_eq!(back, grant);

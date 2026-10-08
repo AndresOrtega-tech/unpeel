@@ -196,18 +196,44 @@ enum OrchestratorReach: String, CaseIterable, Identifiable {
     }
 }
 
-/// The capability half of a session's Unpeel Sessions MCP grant. Mirrors
-/// `McpRole` in `crates/.../state.rs`.
+/// A session's Agent access role — the capability half of its Unpeel
+/// Sessions MCP grant, set from the sidebar's right-click menu. Mirrors
+/// `McpRole` in `crates/unpeel-core/src/state.rs`: raw values are the
+/// persisted spellings, and the retired lineage-model spellings (`write`,
+/// `orchestrator`, bare-string grants) stay inert as `.read`.
 enum McpRole: String, CaseIterable, Identifiable {
     case read
-    case write
+    case write = "send"
+    case manage
 
     var id: String { rawValue }
 
     static func fromStateString(_ value: String?) -> McpRole {
         switch value?.trimmingCharacters(in: .whitespaces).lowercased() {
-        case "write", "writer", "orchestrator": return .write
+        case "send": return .write
+        case "manage": return .manage
         default: return .read
+        }
+    }
+
+    /// Menu label.
+    var label: String {
+        switch self {
+        case .read: return "Read"
+        case .write: return "Write"
+        case .manage: return "Create & remove"
+        }
+    }
+
+    /// One-line explanation shown with the menu item.
+    var detail: String {
+        switch self {
+        case .read:
+            return "Reads every session. Writing to another session follows Settings ▸ Agent access."
+        case .write:
+            return "Also writes to any other session without asking."
+        case .manage:
+            return "Also starts new sessions and removes the ones it started."
         }
     }
 }
@@ -222,14 +248,6 @@ struct McpGrant: Equatable {
 
     /// The default grant for a session with no explicit override.
     static let `default` = McpGrant(role: .read, reach: .project)
-
-    /// The two user-facing access levels collapse role+reach into one choice.
-    var accessLevel: SessionAccessLevel {
-        switch role {
-        case .read: return .read
-        case .write: return .readWrite
-        }
-    }
 }
 
 /// App-wide policy for Sessions MCP writes to any other session. The
@@ -280,53 +298,10 @@ enum McpNonChildWriteAccess: String, CaseIterable, Identifiable {
     }
 }
 
-/// Legacy two-level projection retained while older `McpGrant` state remains
-/// readable. Current Sessions use is open for reads, uses the separate write
-/// approval policy, and leaves session lifecycle with the user.
-enum SessionAccessLevel: String, CaseIterable, Identifiable {
-    case read
-    case readWrite
-
-    var id: String { rawValue }
-
-    var grant: McpGrant {
-        switch self {
-        case .read: return McpGrant(role: .read, reach: .project)
-        case .readWrite: return McpGrant(role: .write, reach: .project)
-        }
-    }
-
-    /// Menu/picker label.
-    var label: String {
-        switch self {
-        case .read: return "Read"
-        case .readWrite: return "Legacy write access"
-        }
-    }
-
-    /// One-line description shown under the label in Settings.
-    var detail: String {
-        switch self {
-        case .read:
-            return "Legacy saved grant. Session reads are now open across the workspace."
-        case .readWrite:
-            return "Legacy saved grant. Writes now use the separate approval policy; agents cannot create or close sessions."
-        }
-    }
-
-    /// Whether this level grants the elevated write capability.
-    var canWriteSessions: Bool {
-        switch self {
-        case .readWrite: return true
-        case .read: return false
-        }
-    }
-}
-
 /// Read-tolerant decoder for one `mcp_orchestrators` value. Accepts the new
 /// object form `{ "role": ..., "reach": ... }` and the legacy bare-string form
-/// (`"project"`/`"global"`), which decodes to the write role at project reach
-/// — matching the Rust `McpGrant` deserializer.
+/// (`"project"`/`"global"`) from the retired lineage model, which stays an
+/// inert Read grant — matching the Rust `McpGrant` deserializer.
 private struct McpGrantFile: Decodable {
     let grant: McpGrant
 
@@ -339,7 +314,7 @@ private struct McpGrantFile: Decodable {
         if let single = try? decoder.singleValueContainer(),
            let legacy = try? single.decode(String.self) {
             let _ = legacy
-            grant = McpGrant(role: .write, reach: .project)
+            grant = .default
             return
         }
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -1181,6 +1156,12 @@ struct SessionEntry: Codable, Identifiable, Hashable, Sendable {
     /// runtime observed inside a blank shell may borrow the agent's logo, but
     /// it does not gain that runtime's transcript adapter or conversation
     /// binding.
+    /// Whether the launch command is a recognized agent runtime — the
+    /// sessions the sidebar offers Agent access roles for.
+    var isAgentSession: Bool {
+        UnpeelRuntimeCatalog.runtime(command: command)?.kind == .agent
+    }
+
     var supportsTranscriptCopy: Bool {
         guard let runtime = UnpeelRuntimeCatalog.runtime(command: command),
               runtime.kind == .agent

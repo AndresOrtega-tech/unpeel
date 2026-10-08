@@ -76,7 +76,10 @@ makes sense for coding, it does not belong here.
   Session all run `mcp_host::call_tool`), so the policy holds whichever
   client an agent uses. Hosted commands run as the user's account, so
   Ask/Deny is a cooperative control for agents using Unpeel's tools, never
-  a hard boundary. Agent Session creation and closing are user-only.
+  a hard boundary. Session creation and closing are user-only unless the
+  user grants one agent Session the **Create & remove** Agent access role
+  (sidebar right-click), and even then it removes only the Sessions it
+  created (`spawned_by`).
 - **Engines are Host-owned and pinned.** The browser engine
   (`protocol/browser-engine-v1.json`) is installed and hash-verified by
   the Host. Desktop automation belongs to the agent or VM environment.

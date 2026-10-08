@@ -109,7 +109,9 @@ final class AppStateFileTests: XCTestCase {
             "legacy-global": "global",
             "legacy-project": "project",
             "reader": { "role": "read", "reach": "project" },
-            "writer": { "role": "write", "reach": "project" }
+            "stale-writer": { "role": "write", "reach": "project" },
+            "writer": { "role": "send", "reach": "project" },
+            "manager": { "role": "manage", "reach": "project" }
           }
         }
         """.utf8)
@@ -117,12 +119,14 @@ final class AppStateFileTests: XCTestCase {
         let state = try JSONDecoder().decode(AppStateFile.self, from: raw)
         let grants = state.mcpOrchestrators
 
-        // Legacy bare strings decode to the write role at project reach.
-        XCTAssertEqual(grants["legacy-global"], McpGrant(role: .write, reach: .project))
-        XCTAssertEqual(grants["legacy-project"], McpGrant(role: .write, reach: .project))
-        // New object form maps role → access level (reach is always project).
-        XCTAssertEqual(grants["reader"]?.accessLevel, .read)
-        XCTAssertEqual(grants["writer"]?.accessLevel, .readWrite)
+        // Retired lineage-model grants (bare strings, `write`) stay inert.
+        XCTAssertEqual(grants["legacy-global"], .default)
+        XCTAssertEqual(grants["legacy-project"], .default)
+        XCTAssertEqual(grants["stale-writer"]?.role, .read)
+        // Agent access roles (reach is always project).
+        XCTAssertEqual(grants["reader"]?.role, .read)
+        XCTAssertEqual(grants["writer"]?.role, .write)
+        XCTAssertEqual(grants["manager"]?.role, .manage)
     }
 
     func testDecodesAppOpenApprovalsAndSemanticPresentations() throws {
@@ -165,11 +169,11 @@ final class AppStateFileTests: XCTestCase {
         {
           "projects": [{ "id": "p1", "name": "Project", "path": "/tmp/project" }],
           "presets": [],
-          "mcp_default_access": { "role": "write", "reach": "project" }
+          "mcp_default_access": { "role": "send", "reach": "project" }
         }
         """.utf8)
         let state = try JSONDecoder().decode(AppStateFile.self, from: withDefault)
-        XCTAssertEqual(state.mcpDefaultAccess.accessLevel, .readWrite)
+        XCTAssertEqual(state.mcpDefaultAccess.role, .write)
 
         // Absent ⇒ the Read/project default.
         let withoutDefault = Data("""
@@ -177,7 +181,7 @@ final class AppStateFileTests: XCTestCase {
         """.utf8)
         let fallback = try JSONDecoder().decode(AppStateFile.self, from: withoutDefault)
         XCTAssertEqual(fallback.mcpDefaultAccess, .default)
-        XCTAssertEqual(fallback.mcpDefaultAccess.accessLevel, .read)
+        XCTAssertEqual(fallback.mcpDefaultAccess.role, .read)
     }
 
     func testDecodesBrowserDefaultAccessWithFallback() throws {
@@ -282,8 +286,11 @@ final class AppStateFileTests: XCTestCase {
         XCTAssertEqual(absent.transcriptSettings, TranscriptSettings())
     }
 
-    func testSessionAccessLevelMapsToCanonicalGrant() {
-        XCTAssertEqual(SessionAccessLevel.read.grant, McpGrant(role: .read, reach: .project))
-        XCTAssertEqual(SessionAccessLevel.readWrite.grant, McpGrant(role: .write, reach: .project))
+    func testAgentAccessRolesPersistAsTheRustSpellings() {
+        XCTAssertEqual(McpRole.allCases.map(\.rawValue), ["read", "send", "manage"])
+        XCTAssertEqual(McpRole.allCases.map(\.label), ["Read", "Write", "Create & remove"])
+        XCTAssertEqual(McpRole.fromStateString(" Manage "), .manage)
+        XCTAssertEqual(McpRole.fromStateString("orchestrator"), .read)
+        XCTAssertEqual(McpRole.fromStateString(nil), .read)
     }
 }

@@ -797,7 +797,7 @@ final class UnpeelStore: ObservableObject {
     @Published private(set) var appTint: AppTint = .none
 
     /// Per-session Unpeel Sessions MCP access overrides, keyed by session id.
-    /// Read from app-state.json on rescan; written back by `setSessionAccess`.
+    /// Read from app-state.json on rescan; written back by `setAgentAccessRole`.
     /// The host reads the same `mcp_orchestrators` field, so this is a direct
     /// (not overlay) setting. A session absent from the map uses the default
     /// grant (`McpGrant.default` — Member at project reach).
@@ -806,7 +806,7 @@ final class UnpeelStore: ObservableObject {
     /// App-wide default Sessions MCP access for sessions without an explicit
     /// override (the `mcp_default_access` field). Read from / written back to
     /// app-state.json so the host honors it too.
-    @Published private(set) var mcpDefaultAccess: SessionAccessLevel = .read
+    @Published private(set) var mcpDefaultAccess: McpRole = .read
 
     /// App-wide policy for Sessions MCP writes to any other session
     /// (`mcp_nonchild_write_access`). Read from / written back to
@@ -4994,6 +4994,45 @@ final class UnpeelStore: ObservableObject {
 
     /// Toggle whether sessions may create worktrees (Settings ▸ Sessions
     /// use). Applied live: the host re-reads the flag per tool call.
+    /// A session's Agent access role: its override, else the app-wide default.
+    func agentAccessRole(for sessionID: String) -> McpRole {
+        mcpOrchestrators[sessionID]?.role ?? mcpDefaultAccess
+    }
+
+    /// Whether the sidebar offers Agent access for this session: agent
+    /// sessions on this Mac's own Host. The grant lives in the Host's
+    /// app-state.json, which a remote or scoped workspace does not share.
+    func canSetAgentAccess(_ sessionID: String) -> Bool {
+        guard selectedHostScope == .local,
+              let session = displaySessionsByID[sessionID]
+        else { return false }
+        return session.isAgentSession
+    }
+
+    /// Set a session's Agent access role (sidebar right-click ▸ Agent
+    /// access). The default role is stored as no override. Only this
+    /// session's entry is edited, under the shared app-state lock, and the
+    /// change is announced; the MCP host re-reads it on every call, so a
+    /// running agent gains or loses the role without a restart.
+    func setAgentAccessRole(_ role: McpRole, for sessionID: String) {
+        guard agentAccessRole(for: sessionID) != role else { return }
+        let isDefault = role == mcpDefaultAccess
+        if isDefault {
+            mcpOrchestrators.removeValue(forKey: sessionID)
+        } else {
+            mcpOrchestrators[sessionID] = McpGrant(role: role, reach: .project)
+        }
+        editPresetStateAnnouncing { root in
+            var grants = root["mcp_orchestrators"] as? [String: Any] ?? [:]
+            if isDefault {
+                grants.removeValue(forKey: sessionID)
+            } else {
+                grants[sessionID] = ["role": role.rawValue, "reach": "project"]
+            }
+            root["mcp_orchestrators"] = grants
+        }
+    }
+
     func setMcpWorktreeAccess(_ enabled: Bool) {
         guard enabled != mcpWorktreeAccess else { return }
         mcpWorktreeAccess = enabled
@@ -6107,7 +6146,7 @@ final class UnpeelStore: ObservableObject {
         if appOpenApprovals != mcpAppOpenApprovals {
             mcpAppOpenApprovals = appOpenApprovals
         }
-        let defaultAccess = (stateFile?.mcpDefaultAccess ?? .default).accessLevel
+        let defaultAccess = (stateFile?.mcpDefaultAccess ?? .default).role
         if defaultAccess != mcpDefaultAccess {
             mcpDefaultAccess = defaultAccess
         }

@@ -548,8 +548,9 @@ fn initialize_result(params: &Value) -> Value {
     app-wide policy for every other session; by default the first write to each target asks \
     for approval — the call blocks (up to ~2 minutes) on an \
     in-session prompt, and an approved pair is remembered. Do not retry in a loop if declined. \
-    You can never write into your own session. Agents never create or close sessions; those \
-    lifecycle actions stay with the user. Sidebar groups are organizational only. \
+    You can never write into your own session. Creating and closing sessions stays with the \
+    user unless they granted your session the Create & remove role; then sessions create/close \
+    work, and close only removes sessions you created. Sidebar groups are organizational only. \
     Preferred terminal flow: sessions list → inspect → small reads. After writing to an agent, \
     use agents wait with status 'idle' (also matches 'done'), or sessions wait_for_text for a \
     specific terminal result. Spatial words from the user such as left, right, above, below, or \
@@ -726,6 +727,8 @@ const SESSIONS_ACTIONS: &[(&str, &str)] = &[
     ("send_text", "send_text"),
     ("send_keys", "send_keys"),
     ("report", "report_to_group"),
+    ("create", "create_session"),
+    ("close", "close_session"),
 ];
 
 const AGENTS_ACTIONS: &[(&str, &str)] = &[
@@ -1204,6 +1207,7 @@ fn run_sessions_tool(name: &str, arguments: &Value) -> Result<String, String> {
         "list_presets" => tool_list_presets(arguments),
         "create_worktree" => tool_create_worktree(arguments),
         "list_worktrees" => tool_list_worktrees(arguments),
+        "create_session" => tool_create_session(arguments),
         "close_session" => tool_close_session(arguments),
         _ => Err(format!("Unknown tool: {name}")),
     }
@@ -1470,9 +1474,18 @@ impl McpSecurity {
             return SessionWriteAccess::SelfDenied;
         }
         use crate::state::McpNonChildWriteAccess as WritePolicy;
+        // A Write or Create & remove role (sidebar ▸ Agent access) answers
+        // the Ask prompt up front; Never allow stays the master disable.
+        let role = self
+            .grants
+            .get(caller_id)
+            .copied()
+            .unwrap_or(self.default_grant)
+            .role;
         match self.write_access {
             WritePolicy::Allow => SessionWriteAccess::Allowed,
             WritePolicy::Deny => SessionWriteAccess::Denied,
+            WritePolicy::Ask if role.writes_without_asking() => SessionWriteAccess::Allowed,
             WritePolicy::Ask if self.write_pair_approved(caller_id, target_id) => {
                 SessionWriteAccess::Allowed
             }
@@ -1584,20 +1597,23 @@ user changes that setting."
         .into()
 }
 
-/// Error returned when a caller tries to create a session. Creation is a
-/// user-only action in Unpeel; agents drive sessions the user created, they
-/// never spawn their own.
+/// Error returned when a caller without the Create & remove role tries to
+/// create a session. Session lifecycle is the user's unless they grant it to
+/// this one session.
 fn creation_disabled_message() -> String {
-    "Agents cannot create sessions in Unpeel — session creation is a user-only action. \
-Ask the user to create the session; you can read it immediately and request write access when \
-you need to affect it."
+    "This session cannot create sessions in Unpeel — session lifecycle stays with the user \
+unless they grant this session the \"Create & remove\" role (right-click it in the sidebar ▸ \
+Agent access). Ask the user to create the session or to grant that role; you can read any \
+session immediately."
         .into()
 }
 
-/// Session lifecycle is owned by the user, just like session creation.
+/// Same rule as creation: only a Create & remove session may close, and only
+/// the sessions it created.
 fn close_disabled_message() -> String {
-    "Agents cannot close sessions in Unpeel — session lifecycle is a user-only action. Ask the \
-user to close the session from an Unpeel Controller."
+    "This session cannot close sessions in Unpeel — session lifecycle stays with the user \
+unless they grant this session the \"Create & remove\" role (right-click it in the sidebar ▸ \
+Agent access). Ask the user to close the session from an Unpeel Controller."
         .into()
 }
 
@@ -1764,6 +1780,8 @@ fn sessions_tool_definition() -> Value {
     targets: 'list', 'inspect', then \
     small screen/output reads. Runtime conversations belong to 'agents'. Reads are open; every \
     write to another session follows the user's live policy and asks for approval by default. \
+    'create' and 'close' work only when the user granted this session the Create & remove role; \
+    'close' only removes sessions this session created. \
     {\"action\":\"help\"} returns full \
     per-action docs and required params.",
         "inputSchema": {
@@ -1794,6 +1812,11 @@ fn sessions_tool_definition() -> Value {
                 "blockers": { "type": "array", "items": { "type": "string" }, "description": "report: blocking issues" },
                 "questions": { "type": "array", "items": { "type": "string" }, "description": "report: questions for the peer/user" },
                 "next_steps": { "type": "array", "items": { "type": "string" }, "description": "report: suggested follow-ups" },
+                "preset": { "type": "string", "description": "create: preset id or label" },
+                "command": { "type": "string", "description": "create: command instead of a preset" },
+                "cwd": { "type": "string", "description": "create: working directory (default: yours)" },
+                "project_id": { "type": "string", "description": "create: sidebar project (default: yours)" },
+                "label": { "type": "string", "description": "create: sidebar title" },
                 "help_for": { "type": "string", "description": "help: docs for one action only" },
             },
             "required": ["action"],
@@ -2279,13 +2302,34 @@ pub(crate) fn legacy_sessions_tool_definitions() -> Vec<Value> {
             },
         }),
         json!({
-            "name": "close_session",
-            "description": "Legacy action retained only for cached clients. Session lifecycle \
-        is user-owned, so agents cannot close sessions.",
+            "name": "create_session",
+            "description": "Start a new session. Requires the \"Create & remove\" role, which \
+        the user grants per session (sidebar right-click ▸ Agent access); otherwise refused — ask \
+        the user instead. Launches a workspace preset (by id or label, see the workspace tool's \
+        list_presets), a raw command, or with neither a plain shell; it runs in the user's login \
+        shell exactly as typed. Returns once the terminal is up — an agent CLI may still be \
+        booting, so wait_for_text for its prompt before send_text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "session_id": { "type": "string", "description": "Target session id from list_sessions" },
+                    "preset": { "type": "string", "description": "Preset id or label to launch" },
+                    "command": { "type": "string", "description": "Command to run instead of a preset" },
+                    "cwd": { "type": "string", "description": "Working directory (default: the calling session's)" },
+                    "project_id": { "type": "string", "description": "Sidebar project (default: the calling session's)" },
+                    "label": { "type": "string", "description": "Sidebar title (default: derived from the command)" },
+                },
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "close_session",
+            "description": "Stop and remove a session this session created with create_session. \
+        Requires the \"Create & remove\" role; sessions the user or another agent created are \
+        never removable. Deletes Unpeel's copy of the terminal output.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Target session id from create_session or list_sessions" },
                 },
                 "required": ["session_id"],
                 "additionalProperties": false,
@@ -2663,12 +2707,19 @@ fn caller_pane_context_json(
     }
 }
 
-fn current_session_access_json(security: &McpSecurity) -> Value {
+fn current_session_access_json(security: &McpSecurity, caller: &HostedSessionManifest) -> Value {
+    let role = security.effective_role(Some(caller));
+    let write_policy = match security.write_access {
+        crate::state::McpNonChildWriteAccess::Ask if role.writes_without_asking() => "allow",
+        policy => policy.as_state_str(),
+    };
     json!({
+        "role": role.as_state_str(),
         "can_read_sessions": true,
-        "can_create_sessions": false,
-        "can_close_sessions": false,
-        "write_policy": security.write_access.as_state_str(),
+        "can_create_sessions": role.manages_sessions(),
+        // Only sessions this caller created (their spawned_by is its id).
+        "can_close_sessions": role.manages_sessions(),
+        "write_policy": write_policy,
     })
 }
 
@@ -2695,7 +2746,7 @@ fn tool_get_current_session(_args: &Value) -> Result<String, String> {
             "id": group_id,
             "peer_count": group_peer_count,
         },
-        "access": current_session_access_json(&security),
+        "access": current_session_access_json(&security, &caller),
         "pane_context": caller_pane_context_json(&caller.session.id, &activity),
     });
 
@@ -3351,9 +3402,155 @@ fn tool_list_presets(args: &Value) -> Result<String, String> {
         .map_err(|e| format!("Failed to encode preset list: {e}"))
 }
 
+/// The calling session, when the user granted it the Create & remove role.
+/// Re-read per call, so granting or revoking from the sidebar applies to an
+/// already-connected agent without a restart.
+fn require_manage_caller(refusal: fn() -> String) -> Result<HostedSessionManifest, String> {
+    let caller = caller_manifest().ok_or_else(read_denied_message)?;
+    if load_security()
+        .effective_role(Some(&caller))
+        .manages_sessions()
+    {
+        Ok(caller)
+    } else {
+        Err(refusal())
+    }
+}
+
+/// The command a create call launches: an enabled preset by id or label
+/// (project-scoped presets only within their project), a raw command, or
+/// a plain shell when neither is given.
+fn resolve_create_command(
+    args: &Value,
+    project_id: &str,
+) -> Result<(String, Option<String>), String> {
+    let preset = optional_trimmed_str(args, "preset");
+    let command = optional_trimmed_str(args, "command");
+    match (preset, command) {
+        (Some(_), Some(_)) => Err("Pass either preset or command, not both.".into()),
+        (None, Some(command)) => Ok((command.to_string(), None)),
+        (None, None) => Ok((String::new(), None)),
+        (Some(wanted), None) => {
+            let state = crate::app_state::load().unwrap_or(Value::Null);
+            let presets: Vec<crate::state::Preset> = state
+                .get("presets")
+                .cloned()
+                .and_then(|raw| serde_json::from_value(raw).ok())
+                .unwrap_or_default();
+            let usable = presets.iter().filter(|preset| {
+                preset.enabled
+                    && preset
+                        .project_id
+                        .as_deref()
+                        .is_none_or(|scope| scope == project_id)
+            });
+            // Project-scoped rows first so an override wins over its global twin.
+            let mut ordered: Vec<&crate::state::Preset> = usable.collect();
+            ordered.sort_by_key(|preset| preset.project_id.is_none());
+            ordered
+                .iter()
+                .find(|preset| preset.id == wanted)
+                .or_else(|| {
+                    ordered
+                        .iter()
+                        .find(|preset| preset.label.eq_ignore_ascii_case(wanted))
+                })
+                .map(|preset| (preset.command.clone(), Some(preset.id.clone())))
+                .ok_or_else(|| {
+                    let labels: Vec<&str> =
+                        ordered.iter().map(|preset| preset.label.as_str()).collect();
+                    format!(
+                        "No enabled preset {wanted:?} in this project. Available: {}.",
+                        if labels.is_empty() {
+                            "none".to_string()
+                        } else {
+                            labels.join(", ")
+                        }
+                    )
+                })
+        }
+    }
+}
+
+/// Start a new session for a caller holding the Create & remove role. The
+/// new session is stamped `spawned_by = <caller id>`, which is the only
+/// thing that lets the same caller remove it later.
+fn tool_create_session(args: &Value) -> Result<String, String> {
+    let caller = require_manage_caller(creation_disabled_message)?;
+    // Like `unpeel new --project`: desktop-owned projects never appear in
+    // app-state's project list, so an explicit id is taken as given.
+    let project_id = optional_trimmed_str(args, "project_id")
+        .map(str::to_string)
+        .unwrap_or_else(|| caller.session.project_id.clone());
+    let (command, source_preset_id) = resolve_create_command(args, &project_id)?;
+    let cwd = optional_trimmed_str(args, "cwd")
+        .map(str::to_string)
+        .unwrap_or_else(|| caller.cwd.clone());
+    if !std::path::Path::new(&cwd).is_dir() {
+        return Err(format!("cwd '{cwd}' is not a directory."));
+    }
+    let (label, custom_title) = match optional_trimmed_str(args, "label") {
+        Some(label) => (label.to_string(), true),
+        None => (crate::state::initial_session_label(&command, &cwd), false),
+    };
+    // Same checkout as the caller: keep its worktree identity with it.
+    let same_checkout = cwd == caller.cwd && project_id == caller.session.project_id;
+    let session = crate::state::SessionInfo {
+        id: String::new(),
+        project_id: project_id.clone(),
+        label: label.clone(),
+        custom_title,
+        command: command.clone(),
+        created_at: current_timestamp_ms(),
+        owner_principal_id: caller.session.owner_principal_id.clone(),
+        created_by_device_id: None,
+        source_preset_id,
+        tag_id: None,
+        worktree_path: same_checkout
+            .then(|| caller.session.worktree_path.clone())
+            .flatten(),
+        worktree_branch: same_checkout
+            .then(|| caller.session.worktree_branch.clone())
+            .flatten(),
+        parent_session_id: None,
+        spawned_by: Some(caller.session.id.clone()),
+        role: None,
+        task: None,
+    };
+    let session_id = crate::session_ops::spawn_session(session, &cwd, None, 120, 32)?;
+    let ready = session_host::wait_until_ready(&session_id, Duration::from_secs(15));
+    serde_json::to_string_pretty(&json!({
+        "session_id": session_id,
+        "label": label,
+        "command": command,
+        "cwd": cwd,
+        "project_id": project_id,
+        "state": if ready.is_ok() { "running" } else { "starting" },
+        "created_by": caller.session.id,
+        "note": "Use wait_for_text for the program's prompt before send_text; close removes it.",
+    }))
+    .map_err(|e| format!("Failed to encode create result: {e}"))
+}
+
+/// Remove a session the caller created. Sessions the user or another agent
+/// created stay user-owned even under Create & remove.
 fn tool_close_session(args: &Value) -> Result<String, String> {
-    let _ = args;
-    Err(close_disabled_message())
+    let caller = require_manage_caller(close_disabled_message)?;
+    let target_id = required_str(args, "session_id")?.trim();
+    if target_id == caller.session.id {
+        return Err("A session cannot close itself. Ask the user to close it.".into());
+    }
+    let target = load_manifest(target_id).ok_or_else(|| {
+        format!("Unknown session id '{target_id}'. Use list to find valid targets.")
+    })?;
+    if target.session.spawned_by.as_deref() != Some(caller.session.id.as_str()) {
+        return Err(format!(
+            "Session '{target_id}' was not created by this session, so it stays user-owned. \
+Ask the user to close it."
+        ));
+    }
+    crate::session_ops::remove_session(target_id)?;
+    Ok(format!("Removed session {target_id}."))
 }
 
 /// Project to operate on: explicit argument, else the calling session's own
@@ -4629,11 +4826,16 @@ mod tests {
                 "missing sessions action {expected}"
             );
         }
-        // Groups do not grant authority, and lifecycle remains user-owned.
+        // create/close are advertised to everyone so a role granted
+        // mid-session works without a reconnect; the call-time gate refuses
+        // them unless the user granted Create & remove.
+        for expected in ["create", "close"] {
+            assert!(actions.iter().any(|action| action == expected));
+        }
+        // Groups do not grant authority.
         for removed in [
             "list_group",
             "report_to_group",
-            "close",
             "start_session",
             "delegate_task",
         ] {
@@ -4857,7 +5059,10 @@ mod tests {
         }
         assert!(!sessions_help_text.contains("### list_group"));
         assert!(!sessions_help_text.contains("### report_to_group"));
-        assert!(!sessions_help_text.contains("### close"));
+        // Lifecycle actions are documented, including the role they need.
+        assert!(sessions_help_text.contains("### create"));
+        assert!(sessions_help_text.contains("### close"));
+        assert!(sessions_help_text.contains("Create & remove"));
 
         let one = run_tool(
             "sessions",
@@ -4956,9 +5161,9 @@ mod tests {
             );
         }
 
-        let err = tool_close_session(&json!({ "session_id": "peer" }))
-            .expect_err("close tool must be refused");
-        assert!(err.contains("cannot close sessions"));
+        // No calling session at all: refused before any lookup.
+        assert!(tool_close_session(&json!({ "session_id": "peer" })).is_err());
+        assert!(tool_create_session(&json!({ "command": "true" })).is_err());
     }
 
     #[test]
@@ -5217,13 +5422,74 @@ mod tests {
     #[test]
     fn current_access_contract_has_no_group_capability() {
         let security = security(HashMap::new());
-        let access = current_session_access_json(&security);
+        let caller = test_manifest("caller", "p", Path::new("/tmp/p"), "claude");
+        let access = current_session_access_json(&security, &caller);
+        assert_eq!(access["role"], "read");
         assert_eq!(access["can_read_sessions"], true);
         assert_eq!(access["can_create_sessions"], false);
         assert_eq!(access["can_close_sessions"], false);
         assert_eq!(access["write_policy"], "ask");
         assert!(access.get("can_control_group").is_none());
         assert!(access.get("can_read_project_sessions").is_none());
+    }
+
+    #[test]
+    fn current_access_reports_the_sidebar_role() {
+        let caller = test_manifest("caller", "p", Path::new("/tmp/p"), "claude");
+        let writer = security(HashMap::from([(
+            "caller".to_string(),
+            grant(McpRole::Write, McpScope::Project),
+        )]));
+        let access = current_session_access_json(&writer, &caller);
+        assert_eq!(access["role"], "send");
+        assert_eq!(access["write_policy"], "allow");
+        assert_eq!(access["can_create_sessions"], false);
+
+        let mut manager = security(HashMap::from([(
+            "caller".to_string(),
+            grant(McpRole::Manage, McpScope::Project),
+        )]));
+        let access = current_session_access_json(&manager, &caller);
+        assert_eq!(access["role"], "manage");
+        assert_eq!(access["can_create_sessions"], true);
+        assert_eq!(access["can_close_sessions"], true);
+        manager.write_access = crate::state::McpNonChildWriteAccess::Deny;
+        let access = current_session_access_json(&manager, &caller);
+        assert_eq!(access["write_policy"], "deny");
+    }
+
+    #[test]
+    fn elevated_roles_skip_the_ask_prompt_but_not_never_allow() {
+        let mut security = security(HashMap::from([
+            (
+                "writer".to_string(),
+                grant(McpRole::Write, McpScope::Project),
+            ),
+            (
+                "manager".to_string(),
+                grant(McpRole::Manage, McpScope::Project),
+            ),
+        ]));
+        for caller in ["writer", "manager"] {
+            assert_eq!(
+                security.session_write_access(caller, "peer"),
+                SessionWriteAccess::Allowed
+            );
+            assert_eq!(
+                security.session_write_access(caller, caller),
+                SessionWriteAccess::SelfDenied
+            );
+        }
+        assert_eq!(
+            security.session_write_access("reader", "peer"),
+            SessionWriteAccess::ApprovalRequired
+        );
+        security.write_access = crate::state::McpNonChildWriteAccess::Deny;
+        assert_eq!(
+            security.session_write_access("manager", "peer"),
+            SessionWriteAccess::Denied,
+            "Never allow stays the master disable"
+        );
     }
 
     #[test]

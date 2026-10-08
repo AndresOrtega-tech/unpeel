@@ -31,7 +31,8 @@ struct SessionsAccessSections: View {
             Text("Every session can read every other session. Writing to another session "
                 + "follows the setting below — by default Unpeel asks you the first time and "
                 + "remembers your answer per pair. Sidebar groups are organizational only, "
-                + "and agents never create or close sessions themselves.")
+                + "and agents never create or close sessions unless you right-click one and "
+                + "set its Agent access to Create & remove.")
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.mutedForeground)
                 .fixedSize(horizontal: false, vertical: true)
