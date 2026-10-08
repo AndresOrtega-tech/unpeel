@@ -184,15 +184,6 @@ enum Snapshot {
             }
         }
 
-        // UNPEEL_OPEN_ARCHIVE=<project-id> — open that project's archived
-        // sessions page at t=0.5s (content-pane swap, same as the project
-        // context menu's "Archived sessions").
-        if let projectID = env["UNPEEL_OPEN_ARCHIVE"], !projectID.isEmpty {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                store.openArchivedSessions(projectID: projectID)
-            }
-        }
-
         // Worktrees render inline under the parent now (no slide-in panel):
         // expand the parent so its worktree folder rows are photographable.
         if let projectID = env["UNPEEL_OPEN_WORKTREES"], !projectID.isEmpty {
@@ -243,17 +234,12 @@ enum Snapshot {
             }
         }
 
-        // UNPEEL_DEBUG_CONFIRM_REMOVE=<session-id>[@archive] — put that
-        // session's row into the inline "Remove session?" confirm state at
-        // t=1.2s (after expansion settles) so a snapshot can photograph it.
-        // The @archive suffix requests the archive-page surface (pair with
-        // UNPEEL_OPEN_ARCHIVE).
-        if let spec = env["UNPEEL_DEBUG_CONFIRM_REMOVE"], !spec.isEmpty {
-            let parts = spec.split(separator: "@", maxSplits: 1).map(String.init)
-            let surface: UnpeelStore.RemoveConfirmSurface =
-                parts.count > 1 && parts[1] == "archive" ? .archivePage : .sidebar
+        // UNPEEL_DEBUG_CONFIRM_REMOVE=<session-id> — put that session's row
+        // into the inline "Remove session?" confirm state at t=1.2s (after
+        // expansion settles) so a snapshot can photograph it.
+        if let sessionID = env["UNPEEL_DEBUG_CONFIRM_REMOVE"], !sessionID.isEmpty {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                store.requestRemoveSession(parts[0], from: surface)
+                store.requestRemoveSession(sessionID)
             }
         }
 

@@ -2,8 +2,8 @@
 # End-to-end tests for the `unpeel` CLI and the `unpeel serve` Host service.
 #
 #   ./run.sh                 # every case
-#   ./run.sh archive unread  # only cases whose name contains one of these
-#   ./run.sh -v archive      # stream the case's own output too
+#   ./run.sh cli mobile      # only cases whose name contains one of these
+#   ./run.sh -v mobile       # stream the case's own output too
 #
 # Each case gets a freshly built UNPEEL_HOME and runs in its own process, so
 # one case can never leave state that changes another's result. Cases are

@@ -2,13 +2,24 @@
   "schemaVersion": 1,
   "protocol": {
     "major": 1,
-    "minor": 21,
+    "minor": 22,
     "compatibility": {
       "major": "must-match",
       "minor": "additive",
       "unknownCapabilities": "ignore"
     },
     "history": [
+      {
+        "minor": 22,
+        "release": "0.7.5",
+        "summary": "Archive withdrawn: a stopped Session is a resumable stopped row, and Stop drops its scrollback. Session capabilities carry `resumable` (Host resume evidence); `archive` and `archived` are always false for older Controllers, whose `archived: true` organization patch runs Stop.",
+        "capabilities": [],
+        "withdrawn": [
+          "session.archive",
+          "session.archive.list",
+          "session.restore"
+        ]
+      },
       {
         "minor": 21,
         "release": "0.7.0",
@@ -202,20 +213,6 @@
       "tui": false
     },
     {
-      "id": "session.archive",
-      "method": "POST",
-      "path": "/mobile/session-organization#archived=true",
-      "native": true,
-      "tui": true
-    },
-    {
-      "id": "session.archive.list",
-      "method": "GET",
-      "path": "/mobile/archive",
-      "native": true,
-      "tui": true
-    },
-    {
       "id": "session.create",
       "method": "POST",
       "path": "/mobile/sessions",
@@ -310,13 +307,6 @@
       "id": "session.restart",
       "method": "POST",
       "path": "/mobile/restart-session",
-      "native": true,
-      "tui": true
-    },
-    {
-      "id": "session.restore",
-      "method": "POST",
-      "path": "/mobile/session-organization#archived=false",
       "native": true,
       "tui": true
     },

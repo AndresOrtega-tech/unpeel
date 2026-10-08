@@ -17,7 +17,7 @@ pub mod activity;
 mod activity_snapshot;
 mod app_context;
 pub mod approvals;
-pub mod auto_archive;
+pub mod auto_stop;
 pub mod computer;
 pub mod control;
 pub mod direct_path;

@@ -8,7 +8,6 @@ struct StartupPresentation: Codable, Equatable, Sendable {
     let hostID: String
     let nodes: [ProjectNode]
     let pins: [String: [PinnedSidebarSession]]
-    let archivedIDs: Set<String>
     let unreadIDs: Set<String>
 }
 

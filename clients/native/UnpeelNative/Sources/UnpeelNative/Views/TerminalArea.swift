@@ -59,7 +59,7 @@ struct ContentArea: View {
         // Belt and braces: even if a future caller wraps settingsVisible in
         // withAnimation, this subtree must not animate the swap.
         .animation(nil, value: store.settingsVisible)
-        // The shared content pane covers terminals, settings, archives, and
+        // The shared content pane covers terminals, settings, All recent, and
         // empty states, so rounding here keeps every right-hand view aligned.
         // Trailing radii track the collapsing surface inset.
         .clipShape(Theme.contentPaneShape(inset: Theme.surfaceInset))
@@ -183,7 +183,6 @@ struct ContentArea: View {
     private func normalizeShownTerminalSize() {
         guard !isRemoteScope else { return }
         guard !store.settingsVisible,
-              store.archivedProjectID == nil,
               !store.recentActivityVisible,
               let id = selection.sessionID
         else { return }
@@ -195,7 +194,6 @@ struct ContentArea: View {
             guard store.selectedHostScope == .local,
                   selection.sessionID == id,
                   !store.settingsVisible,
-                  store.archivedProjectID == nil,
                   !store.recentActivityVisible,
                   store.phoneResizeOverrides[id] == nil,
                   !viewerPresence.hasViewers(sessionID: id)
@@ -284,8 +282,6 @@ struct ContentArea: View {
                 )
                 if store.recentActivityVisible {
                     RecentActivityView(store: store)
-                } else if let project = archivedProject {
-                    ArchivedSessionsView(store: store, project: project)
                 } else if let session = terminalSession {
                     if shouldMountPanePresentation(for: session) {
                         terminalMount(for: session)
@@ -362,10 +358,9 @@ struct ContentArea: View {
         !showsTerminal
     }
 
-    /// A main-pane library (archived sessions or All recent) is covering the
-    /// terminal area.
+    /// A main-pane library (All recent) is covering the terminal area.
     private var coversTerminal: Bool {
-        archivedProject != nil || store.recentActivityVisible
+        store.recentActivityVisible
     }
 
     private var showsTerminal: Bool {
@@ -391,11 +386,6 @@ struct ContentArea: View {
         // never also mounts them (selecting one shows it on the right).
         if store.sessionIsInProjectSidebar(id) { return nil }
         return store.displaySessionsByID[id]
-    }
-
-    private var archivedProject: Project? {
-        guard let id = store.archivedProjectID else { return nil }
-        return store.displayProjectsByID[id]
     }
 
     /// The validated pane group currently shown, if any — drives the

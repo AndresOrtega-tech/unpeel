@@ -1,22 +1,19 @@
-//! Auto-stop-and-archive: the Host-owned sweep that gives a continuously idle
-//! Session the same treatment as the Stop verb once it has sat idle for the
-//! workspace's `auto_stop_archive_minutes`. This used to run only inside the
-//! Mac app and the interactive terminal UI; a headless `unpeel serve` box
-//! now runs it too, against the same setting and the same
-//! `session_ops::archive_session` locking path.
+//! Auto-stop: the Host-owned sweep that stops a continuously idle,
+//! resumable Session once it has sat idle for the workspace's
+//! `auto_stop_archive_minutes` (the key keeps its archive-era name for
+//! compatibility). The Session stays a resumable stopped row; Stop drops
+//! only its scrollback.
 //!
-//! Rules carried over unchanged: the idle clock is anchored to the canonical
-//! hook lifecycle stamp (raw repaints never postpone it), pinned/archived
-//! rows are never touched, only one archive is in flight at a time, a failed
-//! attempt backs off for a minute, and a stopped Session whose archive
-//! marker failed is retried without ever running again.
+//! Rules: the idle clock is anchored to the canonical hook lifecycle stamp
+//! (raw repaints never postpone it), pinned rows and rows without resume
+//! evidence are never touched, only one stop is in flight at a time, and a
+//! failed attempt backs off for a minute.
 //!
-//! Unread (decided 2026-09-04, ships in 0.5.1): an unread Session is NOT a
-//! blocker by itself. On a headless Host nobody views anything, so "unread"
-//! meant "never archive"; archive is non-destructive and the unread badge
-//! survives it. What still blocks is unread ATTENTION — a Session that is
-//! waiting on the user (needs-input/menu prompt) — because archiving would
-//! silently abandon a question the user has not seen.
+//! Unread (decided 2026-09-04): an unread Session is NOT a blocker by
+//! itself — on a headless Host nobody views anything. What still blocks is
+//! unread ATTENTION — a Session waiting on the user (needs-input/menu
+//! prompt) — because stopping it would silently abandon a question the
+//! user has not seen.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
@@ -56,12 +53,12 @@ pub struct Outcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SweepEvent {
-    Archived(String),
+    Stopped(String),
     Failed {
         session_id: String,
         error: String,
     },
-    /// A running row the sweep will not archive, with the first blocking
+    /// A running row the sweep will not stop, with the first blocking
     /// condition; emitted once per row per reason change.
     Skipped {
         session_id: String,
@@ -72,8 +69,8 @@ pub enum SweepEvent {
 pub struct Sweeper {
     /// When this worker started observing. A Session must be seen idle by
     /// THIS Host for the whole cutoff: a stale lifecycle stamp from before
-    /// the worker existed never archives anything on the first sweep, so a
-    /// Host restart (or a freshly adopted home) is not a mass archive.
+    /// the worker existed never stops anything on the first sweep, so a
+    /// Host restart (or a freshly adopted home) is not a mass stop.
     started_at_ms: u64,
     idle_since_ms: HashMap<String, u64>,
     /// Last reported skip reason per row, so the trace line fires once per
@@ -128,7 +125,7 @@ impl Sweeper {
                     session_id: outcome.session_id.clone(),
                     error: error.clone(),
                 },
-                None => SweepEvent::Archived(outcome.session_id.clone()),
+                None => SweepEvent::Stopped(outcome.session_id.clone()),
             });
             apply_outcome(&mut self.issued, &mut self.retry_after_ms, outcome, now_ms);
         }
@@ -175,9 +172,9 @@ impl Sweeper {
         self.issued.insert(id.clone());
         let outcomes = self.outcomes_tx.clone();
         std::thread::Builder::new()
-            .name("unpeel-auto-archive".into())
+            .name("unpeel-auto-stop".into())
             .spawn(move || {
-                let error = unpeel_core::session_ops::archive_session(&id).err();
+                let error = unpeel_core::session_ops::stop_session(&id).err();
                 let _ = outcomes.send(Outcome {
                     session_id: id,
                     error,
@@ -188,7 +185,7 @@ impl Sweeper {
     }
 
     /// The first due row, plus the FIRST blocking condition of every running
-    /// row that is not due (the reason a Session is never archived is
+    /// row that is not due (the reason a Session is never stopped is
     /// otherwise invisible — a headless Session nobody has viewed stays
     /// `unread`, for example).
     fn next_due(
@@ -208,17 +205,15 @@ impl Sweeper {
             }
             let unread = row.unread || unread.contains(&row.id);
             let reason = if row.status == Status::Attention && unread {
-                "unread attention (waiting on the user; never auto-archived unseen)"
+                "unread attention (waiting on the user; never auto-stopped unseen)"
             } else if row.status != Status::Idle {
                 "not idle"
-            } else if !row.archive_available {
-                "no resumable conversation (plain shells are never auto-archived)"
+            } else if !row.resumable {
+                "no resumable conversation (plain shells are never auto-stopped)"
             } else if row.pinned {
                 "pinned"
-            } else if row.archived {
-                "already archived"
             } else if attempt_blocked(&self.issued, &self.retry_after_ms, &row.id, now_ms) {
-                "archive attempt pending or in retry backoff"
+                "stop attempt pending or in retry backoff"
             } else if let Some(&idle_since) = self.idle_since_ms.get(&row.id) {
                 if now_ms.saturating_sub(idle_since) < threshold_ms {
                     "idle for less than the cutoff"
@@ -257,8 +252,7 @@ fn stopped_retry_due(
     now_ms: u64,
 ) -> bool {
     !row.running
-        && row.archive_available
-        && !row.archived
+        && row.resumable
         && !row.pinned
         && !issued.contains(&row.id)
         && retry_after_ms
@@ -358,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_lifecycle_stamp_never_archives_on_the_first_sweep() {
+    fn a_stale_lifecycle_stamp_never_stops_on_the_first_sweep() {
         // A fixture-like row: idle for a year according to its stamp, but
         // this worker has only just started observing it.
         let row = SessionRow {
@@ -370,14 +364,13 @@ mod tests {
             active_runtime_id: None,
             active_app: None,
             resume_available: false,
-            archive_available: true,
+            resumable: true,
             resume_agent_available: false,
             running: true,
             status: Status::Idle,
             status_source: crate::sessions::StatusSource::None,
             created_at: 1_000,
             pinned: false,
-            archived: false,
             unread: false,
             latest_alert_body: None,
             cwd: "/tmp".into(),
@@ -414,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn only_one_archive_is_in_flight_at_a_time() {
+    fn only_one_stop_is_in_flight_at_a_time() {
         assert!(worker_available(&HashSet::new()));
         assert!(!worker_available(&HashSet::from(["s1".to_string()])));
     }
@@ -447,14 +440,13 @@ mod tests {
             active_runtime_id: None,
             active_app: None,
             resume_available: false,
-            archive_available: true,
+            resumable: true,
             resume_agent_available: false,
             running: true,
             status: Status::Idle,
             status_source: crate::sessions::StatusSource::None,
             created_at: 1_000,
             pinned: false,
-            archived: false,
             unread: false,
             latest_alert_body: None,
             cwd: "/tmp".into(),
@@ -465,9 +457,9 @@ mod tests {
     }
 
     /// Unread alone no longer blocks: an idle Session nobody viewed
-    /// archives after the cutoff exactly like a read one (headless Hosts).
+    /// stops after the cutoff exactly like a read one (headless Hosts).
     #[test]
-    fn unread_idle_session_archives_after_the_cutoff() {
+    fn unread_idle_session_stops_after_the_cutoff() {
         let now = 90_000_000_000;
         let started = now - 3 * 60 * 60_000;
         let mut row = idle_row("unseen", started);
@@ -513,7 +505,7 @@ mod tests {
             ),
             "{events:?}"
         );
-        // Once read, an Attention row is simply "not idle" (and still not archived).
+        // Once read, an Attention row is simply "not idle" (and still not stopped).
         row.unread = false;
         let events = sweeper.step(std::slice::from_ref(&row), &HashSet::new(), 60, now + 1_000);
         assert!(

@@ -364,13 +364,6 @@ public struct RemoteMacClient: Sendable {
         return path
     }
 
-    /// One project's archived sessions (the Mac's archive library), for the
-    /// phone's Archive list. 404 = the Mac predates the archive route.
-    public func archivedSessions(projectID: String) async throws -> RemoteArchivedSessionsResponse {
-        let data = try await perform(path: "archive", query: ["project_id": projectID])
-        return try JSONDecoder().decode(RemoteArchivedSessionsResponse.self, from: data)
-    }
-
     /// Rename and/or (un)pin a session on the Mac. The change lands in the
     /// desktop's own overlays, so the next bootstrap poll reflects it.
     public func updateSessionOrganization(_ patch: RemoteSessionOrganizationPatch) async throws {

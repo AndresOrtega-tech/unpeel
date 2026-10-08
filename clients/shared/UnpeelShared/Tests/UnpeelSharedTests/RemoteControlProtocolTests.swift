@@ -563,7 +563,6 @@ final class RemoteControlProtocolTests: XCTestCase {
         let decoded = try roundTrip(patch)
 
         XCTAssertEqual(decoded, patch)
-        XCTAssertNil(decoded.archived)
 
         let pinOnly = try roundTrip(RemoteSessionOrganizationPatch(sessionID: "session-2", pinned: false))
         XCTAssertNil(pinOnly.title)
@@ -625,18 +624,86 @@ final class RemoteControlProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.capabilities?.notifyWhenDone, false)
     }
 
-    func testCapabilitiesDecodeWithoutArchiveDefaultsToFalse() throws {
-        // A Mac that predates the archive verb omits the field; the phone
-        // must hide Archive rather than offer a silent no-op patch.
+    func testCapabilitiesDecodeFromOldHostWithoutOptionalFields() throws {
         let json = """
         {"restart":true,"fork":false,"appendSystemContext":true,"notifyWhenDone":true}
         """
         let decoded = try JSONDecoder().decode(
             RemoteSessionCapabilities.self, from: Data(json.utf8)
         )
-        XCTAssertFalse(decoded.archive)
+        XCTAssertTrue(decoded.restart)
         XCTAssertNil(decoded.restartAgent)
         XCTAssertNil(decoded.resumeAgent)
+        // No resume evidence from an older Host: fail closed.
+        XCTAssertFalse(decoded.resumable)
+    }
+
+    func testCapabilitiesRoundTripResumable() throws {
+        let capabilities = RemoteSessionCapabilities(
+            restart: true, notifyWhenDone: true, resumable: true
+        )
+        let decoded = try roundTrip(capabilities)
+        XCTAssertEqual(decoded, capabilities)
+        XCTAssertTrue(decoded.resumable)
+        let json = String(decoding: try JSONEncoder().encode(capabilities), as: UTF8.self)
+        XCTAssertTrue(json.contains(#""resumable":true"#), json)
+    }
+
+    func testRetiredArchiveKeysFromHostsStillDecode() throws {
+        // Archive is retired (protocol minor 22), but older Hosts — and new
+        // Hosts, for old phones — still send `archive`, `archived`, and
+        // `archivedSessionCount`. Unknown keys must keep decoding cleanly.
+        let capabilities = try JSONDecoder().decode(
+            RemoteSessionCapabilities.self,
+            from: Data(#"{"restart":true,"fork":false,"appendSystemContext":false,"notifyWhenDone":true,"archive":true}"#.utf8)
+        )
+        XCTAssertTrue(capabilities.notifyWhenDone)
+        // An older Host's archive offer was its resume evidence.
+        XCTAssertTrue(capabilities.resumable)
+        // A current Host pins `archive` false and sends `resumable`.
+        let current = try JSONDecoder().decode(
+            RemoteSessionCapabilities.self,
+            from: Data(#"{"restart":false,"notifyWhenDone":false,"archive":false,"resumable":true}"#.utf8)
+        )
+        XCTAssertTrue(current.resumable)
+
+        let session = try JSONDecoder().decode(
+            RemoteSessionSummary.self,
+            from: Data(#"""
+            {"id":"s1","projectID":"p1","title":"t","command":"zsh",
+             "createdAtUnixMs":1,"status":"exited","activity":"idle",
+             "archived":true,
+             "capabilities":{"restart":true,"notifyWhenDone":false,"archive":true}}
+            """#.utf8)
+        )
+        XCTAssertEqual(session.id, "s1")
+        XCTAssertEqual(session.status, .exited)
+        XCTAssertNotNil(session.capabilities)
+
+        let project = try JSONDecoder().decode(
+            RemoteProjectSummary.self,
+            from: Data(#"{"id":"p1","name":"P","path":"/p","mcpBlocked":false,"archivedSessionCount":3}"#.utf8)
+        )
+        XCTAssertEqual(project.id, "p1")
+
+        let patch = try JSONDecoder().decode(
+            RemoteSessionOrganizationPatch.self,
+            from: Data(#"{"sessionID":"s1","archived":true}"#.utf8)
+        )
+        XCTAssertEqual(patch, RemoteSessionOrganizationPatch(sessionID: "s1"))
+    }
+
+    func testEncodedPayloadsCarryNoArchiveKeys() throws {
+        let session = RemoteSessionSummary(
+            id: "s1", projectID: "p1", title: "t", command: "zsh",
+            createdAtUnixMs: 1, status: .exited, activity: .idle,
+            capabilities: RemoteSessionCapabilities(restart: true, notifyWhenDone: false)
+        )
+        let patch = RemoteSessionOrganizationPatch(sessionID: "s1", pinned: true)
+        for data in [try JSONEncoder().encode(session), try JSONEncoder().encode(patch)] {
+            let text = String(decoding: data, as: UTF8.self)
+            XCTAssertFalse(text.lowercased().contains("archive"), text)
+        }
     }
 
     func testCapabilitiesKeepLegacyRestartAgentDecodeOnly() throws {

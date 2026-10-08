@@ -82,10 +82,6 @@ final class ActivityMenuSessionsTests: XCTestCase {
                     "finished", projectID: "project", activity: .done,
                     unread: true, alert: "Close to the weekly limit"
                 ),
-                remoteSession(
-                    "archived", projectID: "project", activity: .done,
-                    unread: true, archived: true
-                ),
             ],
             capturedAtUnixMs: 1
         )
@@ -167,7 +163,6 @@ final class ActivityMenuSessionsTests: XCTestCase {
         projectID: String,
         activity: RemoteActivityState,
         unread: Bool = false,
-        archived: Bool = false,
         alert: String? = nil
     ) -> RemoteSessionSummary {
         RemoteSessionSummary(
@@ -179,7 +174,6 @@ final class ActivityMenuSessionsTests: XCTestCase {
             status: .running,
             activity: activity,
             unread: unread,
-            archived: archived,
             latestAlertBody: alert,
             latestAlertAtUnixMs: alert == nil ? nil : 2
         )

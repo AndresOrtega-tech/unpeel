@@ -15,8 +15,10 @@
 #      against the SAME home for $SOAK seconds, and quits it.
 #   5. Asserts: hosted sessions survived (same pid + pid_started_at), the new
 #      app registered its hook port and attached the live session, the
-#      archive/preset/order/pairing/Link files are byte-identical, and the
-#      unified log shows no modal alert. Prints every other difference.
+#      session the old app archived came back as a plain stopped row (archive
+#      is gone: marker and scrollback dropped), the preset/order/pairing/Link
+#      files are byte-identical, and the unified log shows no modal alert.
+#      Prints every other difference.
 #
 # The home lives under /tmp on purpose: hosted sessions bind
 # <home>/app-sessions/<uuid>/session.sock and sockaddr_un caps the path near
@@ -226,7 +228,7 @@ kill -0 "$new_pid" 2>/dev/null && ok "new app stayed up for ${SOAK}s" || bad "ne
 grep -q . "$HOME_ISO/app-ports" 2>/dev/null && ok "new app registered its hook port in app-ports" || bad "no hook port registered"
 pgrep -fl "unpeel-attach" > "$REPORT/new-app.attach-processes" 2>/dev/null
 pgrep -f "unpeel-attach.*$s1" >/dev/null && ok "new app attached the live session ($s1) with unpeel-attach" || note "no unpeel-attach for $s1 during the soak (attach happens only for the selected pane; see $REPORT/new-app.attach-processes)"
-pgrep -f "unpeel-attach $s2" >/dev/null && bad "new app attached the ARCHIVED session" || ok "archived session stays unattached"
+pgrep -f "unpeel-attach $s2" >/dev/null && bad "new app attached the stopped (formerly archived) session" || ok "stopped (formerly archived) session stays unattached"
 # Which Host owner did this launch pick? (0.4.0+ logs it to hooks/trace.log.)
 if grep -q "native-app Local scope: Host service client" "$HOME_ISO/hooks/trace.log" 2>/dev/null; then
   launch_mode=client
@@ -293,7 +295,11 @@ fi
 after_s1="$(manifest_pid "$s1")"
 [ "${before_s1% *}" = "${after_s1% *}" ] && ok "live session pid/pid_started_at unchanged ($before_s1)" || bad "live session identity changed: $before_s1 -> $after_s1"
 [ "${after_s1##* }" = "running" ] && ok "live session still 'running'" || bad "live session state is ${after_s1##* }"
-[ -f "$HOME_ISO/app-sessions/$s2/archived.json" ] && ok "archive marker intact" || bad "archive marker lost"
+# Archive is gone: the Host worker migrates the old app's archived session to
+# a plain stopped row on start (marker removed, scrollback truncated).
+[ ! -f "$HOME_ISO/app-sessions/$s2/archived.json" ] && [ ! -s "$HOME_ISO/app-sessions/$s2/output.bin" ] && [ -f "$HOME_ISO/app-sessions/$s2/manifest.json" ] \
+  && ok "the archived session became a plain stopped row (marker and scrollback dropped)" \
+  || bad "the archived session was not migrated to a stopped row"
 quit_app "$new_pid"; sleep 2
 fingerprint > "$REPORT/after.sha"
 
@@ -302,9 +308,9 @@ step "differences on disk after the new app (before → after)"
 diff <(awk '{print $2" "$1}' "$REPORT/before.sha") <(awk '{print $2" "$1}' "$REPORT/after.sha") > "$REPORT/home.diff"
 changed="$(grep '^[<>]' "$REPORT/home.diff" | awk '{print $2}' | sort -u)"
 if [ -z "$changed" ]; then echo "  (no file changed)"; else echo "$changed" | sed 's/^/  changed: /'; fi
-must_keep='^\./(app-state\.json|session-order\.json|project-order\.json|profiles\.json|remote\.json|device/|remote/|mobile/|link|license|app-sessions/[^/]+/archived\.json|app-sessions/[^/]+/title\.json)'
+must_keep='^\./(app-state\.json|session-order\.json|project-order\.json|profiles\.json|remote\.json|device/|remote/|mobile/|link|license|app-sessions/[^/]+/title\.json)'
 viol="$(echo "$changed" | grep -E "$must_keep" || true)"
-[ -z "$viol" ] && ok "presets/order/archive/pairing/Link/identity files byte-identical" || bad "protected files changed:$(echo; echo "$viol" | sed 's/^/      /')"
+[ -z "$viol" ] && ok "presets/order/pairing/Link/identity files byte-identical" || bad "protected files changed:$(echo; echo "$viol" | sed 's/^/      /')"
 # app-state.json content-level check (presets, projects, pins, theme)
 python3 - "$REPORT/app-state.before.json" "$HOME_ISO/app-state.json" <<'EOF' && ok "presets (order + stars)/projects/pins/theme/title mode semantically unchanged" || bad "app-state.json semantic change (see $REPORT/app-state.before.json vs the home)"
 import json,sys
@@ -324,7 +330,9 @@ def key(p):
     try: d=json.load(open(p))
     except Exception: return None
     rows=d if isinstance(d,list) else d.get("sessions",d)
-    return sorted((r.get("id"),r.get("status",r.get("state")),bool(r.get("archived"))) for r in rows)
+    # Archive state is deliberately not compared: the upgrade migrates the
+    # archived session to a plain stopped row.
+    return sorted((r.get("id"),r.get("status",r.get("state"))) for r in rows)
 a,b=key(sys.argv[1]),key(sys.argv[2]); sys.exit(0 if a is not None and a==b else 1)
 EOF
 step "modal-dialog heuristic (unified log for the new app run)"

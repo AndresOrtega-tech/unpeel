@@ -66,7 +66,6 @@ extension Project {
         colorID: String? = nil,
         pinned: Bool? = nil,
         mcpBlocked effectiveMcpBlocked: Bool? = nil,
-        archivedSessionCount: Int? = nil,
         dateSorted: Bool? = nil,
         displaySortOrder: Int? = nil,
         sessionOrder: [String]? = nil
@@ -88,7 +87,6 @@ extension Project {
             // the file's own sortOrder is a pre-overlay value that can
             // contradict a drag persisted in project-order.json.
             sortOrder: displaySortOrder ?? sortOrder,
-            archivedSessionCount: archivedSessionCount,
             dateSorted: dateSorted,
             sessionOrder: sessionOrder
         )
@@ -133,7 +131,6 @@ extension SessionEntry {
         updatedAtUnixMs: Int64? = nil,
         notifyWhenDone: Bool = false,
         terminalBackgroundHex: Int? = nil,
-        archived: Bool = false,
         latestAlertBody: String? = nil,
         latestAlertAtUnixMs: Int64? = nil
     ) -> RemoteSessionSummary {
@@ -169,7 +166,6 @@ extension SessionEntry {
             // Verb support, computed here on the Mac so the phone's session
             // sheet offers exactly what the desktop context menu offers.
             capabilities: ProviderCapabilities.remote(session: self),
-            archived: archived,
             // Brand/spinner tint from the Mac's single color table, so a new
             // CLI's color reaches phones without a phone update. An installed
             // Unpeel App's Host-resolved tint wins the same way it does

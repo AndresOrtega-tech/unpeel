@@ -384,10 +384,6 @@ trait RegisteredRemoteBackend: Send + Sync {
             message: "Attachment upload is unavailable on this backend".into(),
         })
     }
-    fn list_archived_sessions(
-        &self,
-        project_id: &str,
-    ) -> Result<Vec<RemoteSessionSummary>, NativeRemoteError>;
     fn read_transcript_markdown(
         &self,
         session_id: &str,
@@ -405,8 +401,6 @@ trait RegisteredRemoteBackend: Send + Sync {
 /// envelope is identical whichever layer produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RemoteSessionVerb {
-    Archive,
-    Restore,
     Stop,
     Remove,
     Restart,
@@ -418,8 +412,6 @@ enum RemoteSessionVerb {
 impl RemoteSessionVerb {
     fn operation(self) -> &'static str {
         match self {
-            Self::Archive => "session archive",
-            Self::Restore => "session restore",
             Self::Stop => "session stop",
             Self::Remove => "session remove",
             Self::Restart => "session restart",
@@ -623,8 +615,6 @@ impl RegisteredRemoteBackend for RegisteredCoreBackend {
         session_id: &str,
     ) -> Result<u64, NativeRemoteEffectError> {
         let receipt = match verb {
-            RemoteSessionVerb::Archive => self.backend.archive_session(session_id),
-            RemoteSessionVerb::Restore => self.backend.restore_session(session_id),
             RemoteSessionVerb::Stop => self.backend.stop_session(session_id),
             RemoteSessionVerb::Remove => self.backend.remove_session(session_id),
             RemoteSessionVerb::Restart => self.backend.restart_session(session_id),
@@ -754,15 +744,6 @@ impl RegisteredRemoteBackend for RegisteredCoreBackend {
             .upload_attachment(session_id, content_type, bytes)
             .map(|uploaded| uploaded.path)
             .map_err(native_remote_effect_error)
-    }
-
-    fn list_archived_sessions(
-        &self,
-        project_id: &str,
-    ) -> Result<Vec<RemoteSessionSummary>, NativeRemoteError> {
-        self.backend
-            .list_archived_sessions(project_id)
-            .map_err(|error| native_remote_backend_error("archived Sessions read", error))
     }
 
     fn read_transcript_markdown(
@@ -1908,13 +1889,6 @@ struct NativeCreatedSessionWire<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct NativeArchivedSessionsWire<'a> {
-    #[serde(rename = "projectID")]
-    project_id: &'a str,
-    sessions: &'a [RemoteSessionSummary],
-}
-
-#[derive(Debug, Serialize)]
 struct NativeTranscriptMarkdownWire<'a> {
     #[serde(rename = "sessionID")]
     session_id: &'a str,
@@ -2428,20 +2402,6 @@ fn upload_remote_attachment(
     })
 }
 
-fn list_remote_archived_sessions(
-    handle: RemoteHandle,
-    project_id: &str,
-) -> Result<Vec<u8>, NativeRemoteError> {
-    let sessions = remote_backend(handle)?.list_archived_sessions(project_id)?;
-    encode_remote_read(
-        "archived Sessions",
-        &NativeArchivedSessionsWire {
-            project_id,
-            sessions: &sessions,
-        },
-    )
-}
-
 fn read_remote_transcript_markdown(
     handle: RemoteHandle,
     session_id: &str,
@@ -2734,15 +2694,12 @@ impl From<NativeBootstrapContext> for HostBootstrapContext {
 struct NativeRouteContext {
     #[serde(default)]
     bootstrap: Option<NativeBootstrapContext>,
-    #[serde(default)]
-    archived_sessions_by_project: std::collections::HashMap<String, Vec<Value>>,
 }
 
 impl From<NativeRouteContext> for HostRouteContext {
     fn from(value: NativeRouteContext) -> Self {
         Self {
             bootstrap: value.bootstrap.map(HostBootstrapContext::from),
-            archived_sessions_by_project: value.archived_sessions_by_project,
         }
     }
 }
@@ -2764,7 +2721,6 @@ impl From<NativeRouteContextEnvelope> for HostRouteContext {
         match value {
             NativeRouteContextEnvelope::LegacyBootstrap(bootstrap) => Self {
                 bootstrap: Some(bootstrap.into()),
-                ..Self::default()
             },
             NativeRouteContextEnvelope::Current(context) => context.into(),
         }
@@ -4149,56 +4105,6 @@ pub unsafe extern "C" fn unpeel_native_bridge_remote_session_project_set(
     finish_remote_effect_ffi(outcome, "session project", out_pointer, out_length)
 }
 
-/// File a remote Session away non-destructively (`session.archive`).
-///
-/// # Safety
-///
-/// A non-empty Session id must point to readable UTF-8 bytes. Both output
-/// pointers must be non-null and writable.
-#[no_mangle]
-pub unsafe extern "C" fn unpeel_native_bridge_remote_session_archive(
-    handle: RemoteHandle,
-    session_id_pointer: *const u8,
-    session_id_length: usize,
-    out_pointer: *mut *mut u8,
-    out_length: *mut usize,
-) -> i32 {
-    remote_session_effect_ffi(
-        handle,
-        session_id_pointer,
-        session_id_length,
-        RemoteSessionVerb::Archive.operation(),
-        out_pointer,
-        out_length,
-        |session_id| perform_remote_session_verb(handle, RemoteSessionVerb::Archive, session_id),
-    )
-}
-
-/// Restore an archived remote Session to the sidebar (`session.restore`).
-///
-/// # Safety
-///
-/// A non-empty Session id must point to readable UTF-8 bytes. Both output
-/// pointers must be non-null and writable.
-#[no_mangle]
-pub unsafe extern "C" fn unpeel_native_bridge_remote_session_restore(
-    handle: RemoteHandle,
-    session_id_pointer: *const u8,
-    session_id_length: usize,
-    out_pointer: *mut *mut u8,
-    out_length: *mut usize,
-) -> i32 {
-    remote_session_effect_ffi(
-        handle,
-        session_id_pointer,
-        session_id_length,
-        RemoteSessionVerb::Restore.operation(),
-        out_pointer,
-        out_length,
-        |session_id| perform_remote_session_verb(handle, RemoteSessionVerb::Restore, session_id),
-    )
-}
-
 /// Stop a remote Session's hosted PTY, keeping the row restartable
 /// (`session.stop`).
 ///
@@ -4828,55 +4734,6 @@ pub unsafe extern "C" fn unpeel_native_bridge_remote_upload_attachment(
     finish_remote_effect_ffi(outcome, "attachment upload", out_pointer, out_length)
 }
 
-/// List one project's archived Sessions (`session.archive.list`) — a
-/// capability-gated read, not an effect. Success returns owned JSON with
-/// `projectID` and `sessions`.
-///
-/// # Safety
-///
-/// A non-empty project id must point to readable UTF-8 bytes. Both output
-/// pointers must be non-null and writable.
-#[no_mangle]
-pub unsafe extern "C" fn unpeel_native_bridge_remote_archived_sessions(
-    handle: RemoteHandle,
-    project_id_pointer: *const u8,
-    project_id_length: usize,
-    out_pointer: *mut *mut u8,
-    out_length: *mut usize,
-) -> i32 {
-    if out_pointer.is_null() || out_length.is_null() {
-        return ERROR_INVALID_INPUT;
-    }
-    *out_pointer = ptr::null_mut();
-    *out_length = 0;
-
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        let project_id = remote_utf8_input(
-            project_id_pointer,
-            project_id_length,
-            "invalid_project_id_buffer",
-            "invalid_project_id_utf8",
-            "Remote project id",
-        )?;
-        list_remote_archived_sessions(handle, project_id)
-    }));
-    match outcome {
-        Ok(Ok(bytes)) => {
-            return_bytes(bytes, out_pointer, out_length);
-            RESULT_OK
-        }
-        Ok(Err(error)) => {
-            let result = error.result;
-            return_bytes(encode_remote_error(error), out_pointer, out_length);
-            result
-        }
-        Err(_) => {
-            return_bytes(remote_panic_error(), out_pointer, out_length);
-            ERROR_PANIC
-        }
-    }
-}
-
 /// Read a remote Session's rendered conversation transcript
 /// (`session.transcript.markdown`) — a capability-gated read, not an effect.
 /// `entries` limits the transcript to the most recent N entries; `0` uses the
@@ -5432,16 +5289,6 @@ mod tests {
             unreachable!("static test backend has no effects")
         }
 
-        fn list_archived_sessions(
-            &self,
-            _project_id: &str,
-        ) -> Result<Vec<RemoteSessionSummary>, NativeRemoteError> {
-            Err(NativeRemoteError::remote(
-                "test_reads_unavailable",
-                "static test backend has no reads",
-            ))
-        }
-
         fn read_transcript_markdown(
             &self,
             _session_id: &str,
@@ -5824,27 +5671,6 @@ mod tests {
                     request["action"].as_str().unwrap_or("-")
                 ));
             Ok(br#"{"protocolVersion":1,"macID":"host-1"}"#.to_vec())
-        }
-
-        fn list_archived_sessions(
-            &self,
-            project_id: &str,
-        ) -> Result<Vec<RemoteSessionSummary>, NativeRemoteError> {
-            self.effects
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(format!("archived:{project_id}"));
-            Ok(vec![serde_json::from_value(json!({
-                "id": "archived-1",
-                "projectID": project_id,
-                "title": "Archived",
-                "command": "claude",
-                "createdAtUnixMs": 1200,
-                "status": "exited",
-                "activity": "idle",
-                "archived": true
-            }))
-            .unwrap()])
         }
 
         fn read_transcript_markdown(
@@ -6261,81 +6087,6 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value == "session.create"));
-    }
-
-    #[test]
-    fn generalized_context_routes_archives_without_leaking_them_into_bootstrap() {
-        let context = serde_json::to_vec(&json!({
-            "bootstrap": {
-                "snapshot": { "sessions": [] },
-                "hostID": "host-1"
-            },
-            "archivedSessionsByProject": {
-                "project-1": [{
-                    "id": "session-1",
-                    "title": "Archived secret"
-                }]
-            }
-        }))
-        .unwrap();
-        let mut archive_request: ControllerRequest =
-            serde_json::from_slice(&request("/mobile/archive")).unwrap();
-        archive_request
-            .query
-            .insert("project_id".into(), "project-1".into());
-        let archive_request = serde_json::to_vec(&archive_request).unwrap();
-
-        let (code, bytes) = guarded_route(&archive_request, Some(&context));
-        assert_eq!(code, RESULT_HANDLED);
-        let response: ControllerResponse = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body["projectID"], "project-1");
-        assert_eq!(response.body["sessions"][0]["id"], "session-1");
-
-        let (code, bytes) = guarded_route(&request("/mobile/bootstrap"), Some(&context));
-        assert_eq!(code, RESULT_HANDLED);
-        let response: ControllerResponse = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body["macID"], "host-1");
-        assert!(!response.body.to_string().contains("Archived secret"));
-        assert!(response.body.get("archivedSessionsByProject").is_none());
-    }
-
-    #[test]
-    fn generalized_context_distinguishes_known_empty_and_unknown_archives() {
-        let context = serde_json::to_vec(&json!({
-            "archivedSessionsByProject": { "project-1": [] }
-        }))
-        .unwrap();
-        let mut archive_request: ControllerRequest =
-            serde_json::from_slice(&request("/mobile/archive")).unwrap();
-        archive_request
-            .query
-            .insert("project_id".into(), "project-1".into());
-
-        let (code, bytes) = guarded_route(
-            &serde_json::to_vec(&archive_request).unwrap(),
-            Some(&context),
-        );
-        assert_eq!(code, RESULT_HANDLED);
-        let response: ControllerResponse = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(response.status, 200);
-        assert_eq!(
-            response.body,
-            json!({ "projectID": "project-1", "sessions": [] })
-        );
-
-        archive_request
-            .query
-            .insert("project_id".into(), "unknown".into());
-        let (code, bytes) = guarded_route(
-            &serde_json::to_vec(&archive_request).unwrap(),
-            Some(&context),
-        );
-        assert_eq!(code, RESULT_HANDLED);
-        let response: ControllerResponse = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(response.status, 404);
-        assert_eq!(response.body["error"], "unknown project");
     }
 
     #[test]
@@ -7311,7 +7062,7 @@ mod tests {
             assert_eq!(take_owned_json(pointer, length)["requestID"], 51);
 
             for verb_ffi in [
-                unpeel_native_bridge_remote_session_archive
+                unpeel_native_bridge_remote_session_stop
                     as unsafe extern "C" fn(
                         RemoteHandle,
                         *const u8,
@@ -7319,8 +7070,6 @@ mod tests {
                         *mut *mut u8,
                         *mut usize,
                     ) -> i32,
-                unpeel_native_bridge_remote_session_restore,
-                unpeel_native_bridge_remote_session_stop,
                 unpeel_native_bridge_remote_session_remove,
                 unpeel_native_bridge_remote_session_restart,
                 unpeel_native_bridge_remote_session_restart_agent,
@@ -7401,20 +7150,6 @@ mod tests {
 
             let mut pointer = ptr::null_mut();
             let mut length = 0;
-            let code = unpeel_native_bridge_remote_archived_sessions(
-                handle,
-                project_id.as_ptr(),
-                project_id.len(),
-                &mut pointer,
-                &mut length,
-            );
-            assert_eq!(code, RESULT_OK);
-            let archived = take_owned_json(pointer, length);
-            assert_eq!(archived["projectID"], "project-1");
-            assert_eq!(archived["sessions"][0]["id"], "archived-1");
-
-            let mut pointer = ptr::null_mut();
-            let mut length = 0;
             let code = unpeel_native_bridge_remote_transcript_markdown(
                 handle,
                 session_id.as_ptr(),
@@ -7452,8 +7187,6 @@ mod tests {
                 "title:s1:Renamed",
                 "pin:s1:true",
                 "notify:s1:true",
-                "session archive:s1",
-                "session restore:s1",
                 "session stop:s1",
                 "session remove:s1",
                 "session restart:s1",
@@ -7463,7 +7196,6 @@ mod tests {
                 "project-organization:project-1:Some(1):None:None:Some(false)",
                 "create:project-1:preset-1",
                 "pairing:create",
-                "archived:project-1",
                 "transcript:s1:20",
                 "metrics:s1",
             ]

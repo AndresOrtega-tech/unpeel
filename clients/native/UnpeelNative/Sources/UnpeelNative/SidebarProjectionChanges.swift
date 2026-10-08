@@ -1,7 +1,7 @@
 import UnpeelShared
 
 enum SidebarProjectionChanges {
-    /// Cache inputs are per-project rows, mixed order, and pin/archive/unread
+    /// Cache inputs are per-project rows, mixed order, and pin/unread
     /// flags. A status change in one folder must not evict every other list.
     static func affectedProjects(
         previous: [ProjectNode], next: [ProjectNode],
@@ -35,8 +35,7 @@ enum SidebarProjectionChanges {
             for session in node.sessions {
                 let lhs = previousSummaries[session.id]
                 let rhs = nextSummaries[session.id]
-                if lhs?.pinned != rhs?.pinned || lhs?.archived != rhs?.archived
-                    || lhs?.unread != rhs?.unread {
+                if lhs?.pinned != rhs?.pinned || lhs?.unread != rhs?.unread {
                     changed.insert(id)
                     break
                 }

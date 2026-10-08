@@ -31,7 +31,7 @@ use std::time::Duration;
 pub enum Change {
     /// Sidebar ordering: `session-order.json` or `project-order.json`.
     Order,
-    /// A session's organization markers: archived / title / read.
+    /// A session's organization markers: title / read / project override.
     SessionMarkers,
     /// `app-state.json`: projects, presets, pins, policies.
     AppState,

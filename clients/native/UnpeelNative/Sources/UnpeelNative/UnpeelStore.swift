@@ -47,23 +47,6 @@ enum NativeOverlay {
     /// surfaced on `RemoteSessionSummary.notifyWhenDone` and read by the push
     /// dispatcher when a session settles. Pruned with the session.
     static let notifyWhenDoneKey = "unpeel.native.notifyWhenDone"
-
-    /// [session id] — archived sessions (stored as an array of ids). Archive
-    /// is the non-destructive "clear it out" verb: the hosted PTY is stopped
-    /// but the session dir (manifest, output.bin, artifacts) stays on disk,
-    /// so Resume brings the conversation back via ResumeCommand. Archived
-    /// sessions form the fixed bottom sidebar section (newest first, sharing
-    /// the inactive-preview cap with natural stops) and are all available from
-    /// the project's dedicated archive page. GC'd when the session dir
-    /// disappears; pruned on true removal.
-    static let archivedSessionsKey = "unpeel.native.archivedSessions"
-
-    /// [session id: ms epoch] — when the user explicitly archived the
-    /// session. Drives archive-section ordering ("file it away" moves the
-    /// row to the top of the archives). Automatic inactivity cleanup
-    /// is deliberately unstamped so it never resurfaces above genuinely
-    /// recent rows. Pruned with the archived flag.
-    static let archivedAtKey = "unpeel.native.archivedAt"
 }
 
 struct SessionRestartRecommendation: Equatable {
@@ -92,55 +75,6 @@ struct SessionRestartRecommendation: Equatable {
 struct ResumeAgentHostCommandFailure: Equatable, Sendable {
     let status: Int
     let message: String
-}
-
-/// Archive listings are fetched independently from the live Host bootstrap.
-/// Keep their summaries in a separate page-scoped cache so a normal live
-/// bootstrap refresh cannot erase the source metadata needed by Restore &
-/// Resume. Session ids are Host-global, but tracking ownership by requested
-/// project lets a refreshed archive page replace its rows without retaining
-/// stale summaries.
-struct RemoteArchivedSessionSummaryCache {
-    private(set) var summariesByID: [String: RemoteSessionSummary] = [:]
-    private var sessionIDsByProject: [String: Set<String>] = [:]
-
-    subscript(sessionID: String) -> RemoteSessionSummary? {
-        summariesByID[sessionID]
-    }
-
-    var sessionIDs: Set<String> {
-        Set(summariesByID.keys)
-    }
-
-    mutating func replaceProject(
-        _ projectID: String,
-        summaries: [RemoteSessionSummary]
-    ) {
-        for sessionID in sessionIDsByProject[projectID] ?? [] {
-            summariesByID.removeValue(forKey: sessionID)
-        }
-        let sessionIDs = Set(summaries.map(\.id))
-        sessionIDsByProject[projectID] = sessionIDs
-        for summary in summaries {
-            summariesByID[summary.id] = summary
-        }
-    }
-
-    mutating func retainProjects(_ projectIDs: Set<String>) {
-        let removedProjectIDs = sessionIDsByProject.keys.filter {
-            !projectIDs.contains($0)
-        }
-        for projectID in removedProjectIDs {
-            for sessionID in sessionIDsByProject.removeValue(forKey: projectID) ?? [] {
-                summariesByID.removeValue(forKey: sessionID)
-            }
-        }
-    }
-
-    mutating func removeAll() {
-        summariesByID.removeAll()
-        sessionIDsByProject.removeAll()
-    }
 }
 
 /// RAII lease for one cross-process lifecycle/marker flock. Replacement
@@ -365,7 +299,6 @@ final class UnpeelStore: ObservableObject {
                         return
                     }
                     if launcherProjectID != nil { launcherProjectID = nil }
-                    if archivedProjectID != nil { archivedProjectID = nil }
                     if recentActivityVisible { recentActivityVisible = false }
                     if remoteHostRuntime.selectedSessionID != id {
                         remoteHostRuntime.selectSession(id)
@@ -388,23 +321,20 @@ final class UnpeelStore: ObservableObject {
             // (launching a launcher tile selects the new session, which is
             // exactly how the picker gives way to the terminal). Do this even
             // when the id was already selected: clicking the highlighted row
-            // is also a natural way to close the archive library.
+            // is also a natural way to close the All recent page.
             if selectedSessionID != nil {
                 if launcherProjectID != nil { launcherProjectID = nil }
-                if archivedProjectID != nil { archivedProjectID = nil }
                 if recentActivityVisible { recentActivityVisible = false }
             }
             guard selectedSessionID != oldValue else { return }
             if let id = selectedSessionID { noteSessionMRU(id) }
             // Selection changes list membership only for a local inactive row
-            // kept past the stopped/archive preview window. Remote lists arrive
+            // kept past the stopped preview window. Remote lists arrive
             // pre-windowed by their Host. Preserve the memoized project lists
             // for the overwhelmingly common live-session switch.
             let windowedInactiveSessionIDs = Set(
                 [oldValue, selectedSessionID].compactMap { $0 }.filter { id in
-                    !archivingSessionIDs.contains(id)
-                        && (archivedSessionIDs.contains(id)
-                            || sessionsByID[id]?.isLive == false)
+                    sessionsByID[id]?.isLive == false
                 }
             )
             if Self.selectionChangeAffectsSidebarLists(
@@ -446,7 +376,7 @@ final class UnpeelStore: ObservableObject {
     private var activityLoggedStatuses: [String: SessionStatus] = [:]
 
     /// Whether the "All recent" main-pane page (RecentActivityView) is
-    /// showing — a content-pane swap like `archivedProjectID`, opened from
+    /// showing — a content-pane swap, opened from
     /// the activity dropdowns' footer link. Deliberately not persisted.
     @Published var recentActivityVisible = false {
         didSet {
@@ -463,35 +393,6 @@ final class UnpeelStore: ObservableObject {
     /// when a session settles (Stop). Persisted; pruned with the session.
     @Published private(set) var notifyWhenDoneSessionIDs: Set<String> =
         Set(AppDefaults.shared.stringArray(forKey: NativeOverlay.notifyWhenDoneKey) ?? [])
-
-    /// Archived sessions (`NativeOverlay.archivedSessionsKey`): hidden from
-    /// the regular sidebar lists (and the phone snapshot) and opened from the
-    /// owning project's context menu in the main pane. Persisted; GC'd on
-    /// rescan when the session dir is gone, pruned on removal.
-    @Published private(set) var archivedSessionIDs: Set<String> =
-        Set(AppDefaults.shared.stringArray(forKey: NativeOverlay.archivedSessionsKey) ?? []) {
-        didSet { if archivedSessionIDs != oldValue { invalidateSidebarLists() } }
-    }
-    /// Deduplicates asynchronous stop/reap work, including recovery after an
-    /// app interruption between persisting the archive flag and stopping the
-    /// host.
-    private var stoppingArchivedSessionIDs: Set<String> = []
-
-    /// Archives whose live host is still shutting down: the sidebar keeps
-    /// these rows visible — muted, with a spinner — until the stop finishes,
-    /// instead of vanishing them mid-click. In-memory only (a relaunch's
-    /// recovery stop needs no visible row).
-    @Published private(set) var archivingSessionIDs: Set<String> = [] {
-        didSet { if archivingSessionIDs != oldValue { invalidateSidebarLists() } }
-    }
-
-    /// When the user explicitly archived each session (ms epoch,
-    /// `NativeOverlay.archivedAtKey`): a stamped row sorts to the top of the
-    /// archive section. Automatic inactivity archives never stamp. Pruned
-    /// alongside the archived flag.
-    private var archivedAtBySession: [String: Int64] =
-        (AppDefaults.shared.dictionary(forKey: NativeOverlay.archivedAtKey) ?? [:])
-            .compactMapValues { ($0 as? NSNumber)?.int64Value }
 
     /// Project ids whose session lists are expanded in the sidebar.
     /// Persisted (unlike the Svelte `expandedProjectIds` store, which reset
@@ -523,7 +424,7 @@ final class UnpeelStore: ObservableObject {
     @Published private(set) var projectFolderColorIDs: [String: String] = [:]
 
     /// Sidebar inactive preview: active sessions always render; below them at
-    /// most this many naturally stopped or archived rows show. Pinned rows
+    /// most this many stopped rows show. Pinned rows
     /// don't count against the window. User-selectable — shared
     /// with the TUI via the compatibility key `sidebar_stopped_limit` in
     /// app-state.json; absent key = five, explicit 0 = no inactive preview.
@@ -534,17 +435,17 @@ final class UnpeelStore: ObservableObject {
     }
 
     /// Session ids pinned visible past the inactive-preview window — set when
-    /// the app must bring a hidden stopped or archived row back into the sidebar
-    /// (restore from archive, reveal on select). In-memory only; pruned with
+    /// the app must bring a hidden stopped row back into the sidebar
+    /// (reveal on select, unpin). In-memory only; pruned with
     /// the session on rescan.
     @Published private(set) var sidebarKeepVisibleSessionIDs: Set<String> = [] {
         didSet { if sidebarKeepVisibleSessionIDs != oldValue { invalidateSidebarLists() } }
     }
 
     /// Recency stamp applied when a Session is unpinned so the row re-enters
-    /// its stopped/archive block at the top (right below the live rows)
+    /// its stopped block at the top (right below the live rows)
     /// instead of falling back to its old lifecycle position — which, for an
-    /// old archived row, pushed it past the preview window and made it look
+    /// old stopped row, pushed it past the preview window and made it look
     /// like unpin closed the Session. In-memory only, pruned with the session
     /// on rescan, exactly like `sidebarKeepVisibleSessionIDs`.
     @Published private(set) var sidebarUnpinRecencyBump: [String: Int64] = [:] {
@@ -717,26 +618,6 @@ final class UnpeelStore: ObservableObject {
     /// the empty state. Pure native UI state; never persisted. Cleared the
     /// moment a real session is selected (see `selectedSessionID`).
     @Published var launcherProjectID: String?
-
-    /// Project whose archived-session library fills the main content area.
-    /// Opened from the project row's context menu; selecting a session,
-    /// opening Settings, or opening the launcher dismisses it.
-    @Published var archivedProjectID: String? {
-        didSet {
-            guard archivedProjectID != oldValue else { return }
-            if archivedProjectID != nil, let selectedSessionID {
-                dismissPaneLaunchers(containing: selectedSessionID)
-            }
-            // The Host archive endpoint is a page-scoped data source. Drop
-            // the old page immediately so a late response cannot make an
-            // archived row (or its resume metadata) actionable after close
-            // or after switching projects.
-            remoteArchivePageGeneration &+= 1
-            remoteArchivedByProject = [:]
-            remoteArchivedSummaryCache.removeAll()
-            handleObservationChanged()
-        }
-    }
 
     /// Display pins per project id, newest-first, pruned to sessions that
     /// still exist. Merged from app-state.json (Tauri-owned, read-only) and
@@ -1075,12 +956,12 @@ final class UnpeelStore: ObservableObject {
     /// survives a switch back to custom.
     @Published private(set) var dateSortedProjectIDs: Set<String> = []
 
-    /// Settings ▸ Advanced auto-stop-and-archive: sessions CONTINUOUSLY idle
-    /// for this many minutes (0 = off) are stopped and archived in one motion
-    /// — the same `archiveSession` verb as "Stop and archive" in the sidebar,
-    /// so nothing is deleted and Restore + Restart resumes the conversation.
-    /// Shared with the TUI via `auto_stop_archive_minutes` in app-state.json.
-    @Published private(set) var autoStopArchiveMinutes = 0
+    /// Settings ▸ Advanced "Auto-stop inactive terminals": sessions
+    /// CONTINUOUSLY idle for this many minutes (0 = off) are stopped — the
+    /// same verb as the sidebar's Stop, so the row stays and Resume continues
+    /// the conversation. Shared with the TUI via the compatibility key
+    /// `auto_stop_archive_minutes` in app-state.json.
+    @Published private(set) var autoStopMinutes = 0
 
     /// Settings ▸ Appearance session-title driver — `session_title_mode` in
     /// app-state.json, shared with the TUI and read live by every session
@@ -1298,7 +1179,7 @@ final class UnpeelStore: ObservableObject {
 
     /// Collector for the per-session-dir disk phase of a rescan (dir
     /// enumeration, manifest stat + cached decode, output.bin stats,
-    /// archived markers). Owns the manifest decode cache so scheduled
+    /// resume evidence). Owns the manifest decode cache so scheduled
     /// rescans can collect on a background queue — see `scheduleRescan`.
     let scanCollector = ScanSnapshotCollector()
     private let scanCollectQueue = DispatchQueue(
@@ -1314,7 +1195,6 @@ final class UnpeelStore: ObservableObject {
     private var scanEntryCache: [String: SessionEntry] = [:]
     private var scanEntryCacheTitleOverrides: [String: String]?
     private var scanEntryCacheOverrideStamps: [String: FileStamp] = [:]
-    private var scanEntryCacheArchivedDirs: Set<String> = []
     private var appStateCache: (stamp: FileStamp, file: AppStateFile?)?
 
     /// Single `stat(2)` call: much cheaper than FileManager.attributesOfItem
@@ -1685,7 +1565,7 @@ final class UnpeelStore: ObservableObject {
     // MARK: Remote-scope display projection
     //
     // Local truth (`nodes`, `sessionsByID`, `projectsByID`, presets, pins,
-    // unread/archived sets) always tracks THIS Mac — it also feeds the
+    // unread set) always tracks THIS Mac — it also feeds the
     // /mobile Host serving path, which keeps serving paired phones while a
     // remote Host is selected. Remote scope projects the selected Host's
     // bootstrap into these parallel structures, and the views read the
@@ -1694,10 +1574,7 @@ final class UnpeelStore: ObservableObject {
     @Published private(set) var remoteNodes: [ProjectNode] = []
     @Published private(set) var remoteSessionsByID: [String: SessionEntry] = [:]
     @Published private(set) var remoteProjectsByID: [String: Project] = [:]
-    @Published private(set) var remoteArchivedByProject: [String: [SessionEntry]] = [:]
     private(set) var remoteSummariesByID: [String: RemoteSessionSummary] = [:]
-    private var remoteArchivedSummaryCache = RemoteArchivedSessionSummaryCache()
-    private var remoteArchivePageGeneration: UInt64 = 0
     private var remoteProjectSummariesByID: [String: RemoteProjectSummary] = [:]
     private var remoteSessionOrderByProject: [String: [String]] = [:]
     private var remotePresetSummaries: [RemotePresetSummary] = []
@@ -1762,7 +1639,7 @@ final class UnpeelStore: ObservableObject {
     private nonisolated static let nativeCodeEditorKey = "unpeel.native.codeEditor"
     private static let appPresentationReceiptsKey =
         "unpeel.native.appPresentationReceipts.v1"
-    // Legacy cleanup keys (pre auto-stop-and-archive merge). The stop-minutes
+    // Legacy cleanup keys (pre shared auto-stop setting). The stop-minutes
     // value is folded once into app-state.json's `auto_stop_archive_minutes`
     // (the shared truth the TUI also reads); the cleanup-days setting was
     // removed outright.
@@ -1777,15 +1654,14 @@ final class UnpeelStore: ObservableObject {
     private static let legacyCLIOrderKey = "unpeel.native.cliOrder"
     private static let nativeProjectFolderColorsKey = "unpeel.native.projectFolderColors"
 
-    static let autoStopArchiveMinuteOptions = [0, 30, 60, 120, 240, 480, 1440]
+    static let autoStopMinuteOptions = [0, 30, 60, 120, 240, 480, 1440]
 
     /// Opt-out default: a day of unbroken idleness before the terminal is
-    /// stopped and archived. Safe because archive is non-destructive
-    /// (Restore + Restart resumes the conversation) and plain shells are
-    /// exempt entirely.
-    static let defaultAutoStopArchiveMinutes = 1440
+    /// stopped. Safe because Stop is non-destructive (Resume continues the
+    /// conversation) and plain shells are exempt entirely.
+    static let defaultAutoStopMinutes = 1440
 
-    static func autoStopArchiveLabel(for minutes: Int) -> String {
+    static func autoStopLabel(for minutes: Int) -> String {
         switch minutes {
         case 0: return "Never"
         case ..<60: return "After \(minutes) minutes"
@@ -1810,7 +1686,8 @@ final class UnpeelStore: ObservableObject {
             rawValue: AppDefaults.shared.string(forKey: Self.commandTActionKey) ?? ""
         ) ?? .newTerminal
         projectFolderColorIDs = Self.loadProjectFolderColorIDs()
-        Self.migrateAutoStopArchiveSetting()
+        Self.migrateAutoStopSetting()
+        Self.removeLegacyArchiveDefaults()
         activityLogEntries = activityLog.entries
         presetOrder = Self.loadPresetOrder()
         paneLayoutController.objectWillChange
@@ -2086,7 +1963,6 @@ final class UnpeelStore: ObservableObject {
         projectsByID = projects
         sessionsByID = sessions
         pinnedByProject = saved.pins
-        archivedSessionIDs = saved.archivedIDs
         unreadSessionIDs = saved.unreadIDs
         restorePersistedSessionSelection()
         // hasCompletedScan deliberately stays false: cached status is only
@@ -2106,7 +1982,6 @@ final class UnpeelStore: ObservableObject {
         let value = StartupPresentation(
             home: Self.currentInstanceNormalizedHome(), hostID: localHostID,
             nodes: nodes, pins: pins,
-            archivedIDs: Set(summaries.filter(\.archived).map(\.id)),
             unreadIDs: Set(summaries.filter(\.unread).map(\.id))
         )
         guard value != lastStartupPresentation else { return }
@@ -2243,7 +2118,6 @@ final class UnpeelStore: ObservableObject {
             commandHintsVisible = false
             setControlHintsVisible(false)
             launcherProjectID = nil
-            archivedProjectID = nil
             recentActivityVisible = false
             remoteHostStore.selectHost(hostID)
             selectedHostScope = .remote(hostID: hostID)
@@ -2375,7 +2249,6 @@ final class UnpeelStore: ObservableObject {
         commandHintsVisible = false
         setControlHintsVisible(false)
         launcherProjectID = nil
-        archivedProjectID = nil
         recentActivityVisible = false
         remoteHostStore.selectLocalWorkspace(home: normalizedHome)
         selectedHostScope = .localWorkspace(home: normalizedHome, name: name)
@@ -2599,13 +2472,13 @@ final class UnpeelStore: ObservableObject {
         menuTrackingDepth > 0
             || editingSessionID != nil
             || confirmingRemoveSessionID != nil
-            || confirmingArchiveSessionID != nil
+            || confirmingStopSessionID != nil
             || confirmingRemoveProjectID != nil
     }
 
     /// Schedule rather than flush synchronously from a published property's
     /// didSet. Some transitions clear one inline state immediately before
-    /// setting another (archive confirm -> remove confirm); the next main-loop
+    /// setting another (stop confirm -> remove confirm); the next main-loop
     /// turn observes the settled state and cannot briefly remount the row.
     private func scheduleDeferredRemoteProjectionFlush() {
         guard remoteProjectionDeferredForSidebarInteraction else { return }
@@ -3138,12 +3011,11 @@ final class UnpeelStore: ObservableObject {
     /// The session whose terminal the user is actually looking at:
     /// the selected session while the app is frontmost and the workspace is
     /// showing (getObservedWorkspaceSessionId, sessionUnread.ts:25-38 —
-    /// shellView must be the terminal workspace, so Settings and the archive
-    /// library both un-observe it).
+    /// shellView must be the terminal workspace, so Settings and the All
+    /// recent page both un-observe it).
     private var observedSessionID: String? {
         guard NSApp.isActive,
               !settingsVisible,
-              archivedProjectID == nil,
               !recentActivityVisible
         else { return nil }
         if selectedHostScope == .local,
@@ -3517,7 +3389,7 @@ final class UnpeelStore: ObservableObject {
                 computerUseUnavailableReason: computerAdapterReason,
                 workspaces: isExperimentalEnabled(.workspaces)
             ),
-            autoStopArchiveMinutes: autoStopArchiveMinutes,
+            autoStopArchiveMinutes: autoStopMinutes,
             sidebarStoppedLimit: sidebarVisibleSessionLimit,
             browserDefaultAccess: access("browser_default_access", "on"),
             mcpNonchildWriteAccess: access("mcp_nonchild_write_access", "ask"),
@@ -3597,51 +3469,53 @@ final class UnpeelStore: ObservableObject {
         rescan()
     }
 
-    // MARK: - Archive (non-destructive "clear it out")
+    // MARK: - Stop (non-destructive "clear it out")
 
-    /// Session ids showing the inline "Stop & archive?" confirmation row —
-    /// only sessions that are actively working (busy/starting/attention)
-    /// confirm; idle and exited sessions archive directly.
-    @Published private(set) var confirmingArchiveSessionID: String? {
+    /// Session id showing the inline "Stop?" confirmation row — only
+    /// sessions that are actively working (busy/starting/attention) confirm;
+    /// idle sessions stop directly.
+    @Published private(set) var confirmingStopSessionID: String? {
         didSet {
-            if confirmingArchiveSessionID == nil {
+            if confirmingStopSessionID == nil {
                 scheduleDeferredRemoteProjectionFlush()
             }
         }
     }
 
-    /// Archive entry point for the UI: working sessions get an inline
-    /// confirm (archiving kills the turn mid-flight); settled ones archive
-    /// straight away. Launches without a provider conversation/storage route
-    /// to Remove instead; neither user action nor inactivity cleanup may put
-    /// a non-resumable Session in Archive.
-    func requestArchiveSession(_ sessionID: String) {
-        guard let session = displaySessionsByID[sessionID] else { return }
-        guard sessionCanArchive(sessionID) else {
+    /// Stop entry point for the sidebar row and context menu: working
+    /// sessions get an inline confirm (stopping kills the turn mid-flight);
+    /// idle ones stop straight away. The row stays in the sidebar as a
+    /// stopped row whose Resume continues the conversation. Launches without
+    /// a resumable conversation route to Remove instead — stopping them
+    /// would only leave a dead row behind.
+    func requestStopSession(_ sessionID: String) {
+        guard let session = displaySessionsByID[sessionID], session.isLive else { return }
+        guard sessionCanStop(sessionID) else {
             requestRemoveSession(sessionID)
             return
         }
         confirmingRemoveSessionID = nil
         switch session.status {
         case .starting, .busy, .attention:
-            confirmingArchiveSessionID = sessionID
+            confirmingStopSessionID = sessionID
         case .idle, .exited:
-            archiveSession(sessionID)
+            confirmStopSession(sessionID)
         }
     }
 
-    func cancelArchiveConfirm() {
-        confirmingArchiveSessionID = nil
+    /// Confirmed Stop from the inline row — skips the busy re-check that
+    /// `requestStopSession` routes through (it would just re-arm the confirm).
+    func confirmStopSession(_ sessionID: String) {
+        if confirmingStopSessionID == sessionID {
+            confirmingStopSessionID = nil
+        }
+        _ = stopSession(sessionID)
     }
 
-    /// Stop-and-file-away: kill the hosted PTY (same identity-guarded path as
-    /// Remove) and reap the session's browser daemon, but keep the session
-    /// dir — manifest, output.bin, artifacts, provider-id overlay — intact,
-    /// then hide the row from the sidebar. The project's archived-session
-    /// view can resume the exact conversation via ResumeCommand.
-    /// `stampRecency` is true for user-initiated archives (the stamp floats
-    /// the row to the top of the archive section); automatic inactivity
-    /// cleanup passes false so old sessions file away without resurfacing.
+    func cancelStopConfirm() {
+        confirmingStopSessionID = nil
+    }
+
     // MARK: - Shared sidebar order (cross-frontend contract)
 
     /// `~/.unpeel/session-order.json` — `{ project_id: [session ids] }`, the
@@ -3748,14 +3622,13 @@ final class UnpeelStore: ObservableObject {
 
     // MARK: - Shared session markers (cross-frontend contract)
 
-    /// Session-dir markers any frontend can write: `archived.json`,
-    /// `title.json`, `read.json`. The TUI and CLI have no access to this
+    /// Session-dir markers any frontend can write: `title.json`,
+    /// `read.json`, `project-override.json`. The TUI and CLI have no access to this
     /// app's UserDefaults overlays, so these files are how the desktop, a
     /// headless host, and the phone agree on organization state. The
     /// Shared markers are authoritative once present. UserDefaults overlays
     /// remain only as migration/write-failure fallbacks for older builds.
     enum SharedMarker: String {
-        case archived = "archived.json"
         case title = "title.json"
         case read = "read.json"
         /// Hook-captured provider conversation metadata — see
@@ -4035,14 +3908,13 @@ final class UnpeelStore: ObservableObject {
         )
     }
 
-    /// Recency for every listable (non-archived) session, snapshotted once
-    /// per ⌘K open so every keystroke filters one stable ordering.
+    /// Recency for every listable session, snapshotted once per ⌘K open so
+    /// every keystroke filters one stable ordering.
     func paletteRecencySnapshot() -> [String: Int64] {
         var snapshot: [String: Int64] = [:]
         func collect(_ nodes: [ProjectNode]) {
             for node in nodes {
-                for session in node.sessions
-                where !archivedSessionIDs.contains(session.id) {
+                for session in node.sessions {
                     snapshot[session.id] = sessionRecencyMs(session.id)
                 }
                 collect(node.worktrees)
@@ -4050,78 +3922,6 @@ final class UnpeelStore: ObservableObject {
         }
         collect(nodes)
         return snapshot
-    }
-
-    func archiveSession(_ sessionID: String, stampRecency: Bool = true) {
-        guard sessionCanArchive(sessionID) else { return }
-        if confirmingArchiveSessionID == sessionID {
-            confirmingArchiveSessionID = nil
-        }
-        performRemoteVerb("Couldn't archive the session") { runtime in
-            try await runtime.archiveSession(sessionID)
-        }
-    }
-
-    /// Put an archived session back in the regular list (as a restartable
-    /// exited row — archive stopped its host).
-    func unarchiveSession(_ sessionID: String) {
-        performRemoteVerb("Couldn't restore the session") { runtime in
-            try await runtime.restoreSession(sessionID)
-        }
-    }
-
-    /// Restore without starting: return the row to its project, close the
-    /// archive library, and make sure the sidebar can actually show it.
-    func restoreArchivedSessionToSidebar(_ sessionID: String) {
-        // Remote archive page: restore on the Host; the row returns to the
-        // sidebar on the next bootstrap.
-        unarchiveSession(sessionID)
-        archivedProjectID = nil
-    }
-
-    /// Resume an archived provider conversation and take the user straight
-    /// back to its terminal. `restartSession` mints the replacement id and
-    /// prunes the archived flag from the old id during teardown.
-    @discardableResult
-    func resumeArchivedSession(_ sessionID: String) -> Bool {
-        // Remote archive page: restore + restart on the Host as one flow.
-        guard let source = remoteSummary(for: sessionID) else { return false }
-        let knownSessionIDs = Set(remoteSummariesByID.keys)
-            .union(remoteArchivedSummaryCache.sessionIDs)
-        guard !restartingSessionIDs.contains(sessionID) else { return false }
-        archivedProjectID = nil
-        beginRemoteRestartPlaceholder(sessionID)
-        performRemoteVerb("Couldn't resume the session", onFailure: { [weak self] in
-            self?.endRemoteRestartPlaceholder(sessionID)
-        }) { runtime in
-            try await runtime.restoreAndRestartSession(
-                source,
-                knownSessionIDs: knownSessionIDs
-            )
-        }
-        return true
-    }
-
-    private func persistArchivedSessionIDs() {
-        if archivedSessionIDs.isEmpty {
-            AppDefaults.shared.removeObject(forKey: NativeOverlay.archivedSessionsKey)
-        } else {
-            AppDefaults.shared.set(
-                Array(archivedSessionIDs), forKey: NativeOverlay.archivedSessionsKey
-            )
-        }
-        // The recency stamps live and die with the archived flag.
-        archivedAtBySession = archivedAtBySession.filter {
-            archivedSessionIDs.contains($0.key)
-        }
-        if archivedAtBySession.isEmpty {
-            AppDefaults.shared.removeObject(forKey: NativeOverlay.archivedAtKey)
-        } else {
-            AppDefaults.shared.set(
-                archivedAtBySession.mapValues { NSNumber(value: $0) },
-                forKey: NativeOverlay.archivedAtKey
-            )
-        }
     }
 
     // MARK: - Settings screen (App.svelte openSettings/closeSettings:442-456)
@@ -4143,7 +3943,6 @@ final class UnpeelStore: ObservableObject {
         }
         // The settings nav takes over the sidebar list area; drop the
         // main-pane library so Back always returns to the project tree.
-        archivedProjectID = nil
         recentActivityVisible = false
         settingsVisible = true
     }
@@ -4176,7 +3975,7 @@ final class UnpeelStore: ObservableObject {
                 guard selectedHostScope == scope else { completion?(nil); return }
                 struct ProjectReceipt: Decodable { let id: String }
                 let project = try JSONDecoder().decode(ProjectReceipt.self, from: data)
-                settingsVisible = false; archivedProjectID = nil; selectedSessionID = nil
+                settingsVisible = false; selectedSessionID = nil
                 expandedProjectIDs.insert(project.id)
                 launcherProjectID = project.id
                 completion?(path)
@@ -4524,17 +4323,17 @@ final class UnpeelStore: ObservableObject {
 
     // MARK: - Advanced session cleanup
 
-    private static func normalizedAutoStopArchiveMinutes(_ minutes: Int) -> Int {
-        autoStopArchiveMinuteOptions.contains(minutes) ? minutes : 0
+    private static func normalizedAutoStopMinutes(_ minutes: Int) -> Int {
+        autoStopMinuteOptions.contains(minutes) ? minutes : 0
     }
 
     /// Resolve the shared file value: absent key = on at the default cutoff
     /// (opt-out feature); an explicit value — including 0 = Never — wins.
-    static func resolvedAutoStopArchiveMinutes(_ stateFile: AppStateFile?) -> Int {
-        guard let raw = stateFile?.autoStopArchiveMinutes else {
-            return defaultAutoStopArchiveMinutes
+    static func resolvedAutoStopMinutes(_ stateFile: AppStateFile?) -> Int {
+        guard let raw = stateFile?.autoStopMinutes else {
+            return defaultAutoStopMinutes
         }
-        return normalizedAutoStopArchiveMinutes(raw)
+        return normalizedAutoStopMinutes(raw)
     }
 
     /// One-time fold of the legacy UserDefaults auto-stop minutes into
@@ -4544,14 +4343,24 @@ final class UnpeelStore: ObservableObject {
     /// 0 = Never — must survive the move. The legacy keys stay in the
     /// defaults suite (older builds sharing it keep working) but are never
     /// read again.
-    private static func migrateAutoStopArchiveSetting() {
+    private static func migrateAutoStopSetting() {
         guard let legacy = AppDefaults.shared
             .object(forKey: legacyAutoSessionStopMinutesKey) as? Int
         else { return }
         _ = PresetStateFile.edit { object in
             if object["auto_stop_archive_minutes"] == nil {
-                object["auto_stop_archive_minutes"] = normalizedAutoStopArchiveMinutes(legacy)
+                object["auto_stop_archive_minutes"] = normalizedAutoStopMinutes(legacy)
             }
+        }
+    }
+
+    /// Archive was retired: closing a Session stops it, and the Host turns
+    /// old archived rows into plain stopped rows. Drop the overlay keys older
+    /// builds wrote — a cheap no-op once they are gone.
+    private static func removeLegacyArchiveDefaults() {
+        for key in ["unpeel.native.archivedSessions", "unpeel.native.archivedAt"]
+        where AppDefaults.shared.object(forKey: key) != nil {
+            AppDefaults.shared.removeObject(forKey: key)
         }
     }
 
@@ -4566,15 +4375,15 @@ final class UnpeelStore: ObservableObject {
         sessionTitleMode = mode
     }
 
-    func setAutoStopArchiveMinutes(_ minutes: Int) {
-        let normalized = Self.normalizedAutoStopArchiveMinutes(minutes)
+    func setAutoStopMinutes(_ minutes: Int) {
+        let normalized = Self.normalizedAutoStopMinutes(minutes)
         // Always store explicitly — absent means "default on", so Never (0)
         // must be a written value, not a removed key.
         _ = editPresetStateAnnouncing { object in
             object["auto_stop_archive_minutes"] = normalized
         }
-        guard normalized != autoStopArchiveMinutes else { return }
-        autoStopArchiveMinutes = normalized
+        guard normalized != autoStopMinutes else { return }
+        autoStopMinutes = normalized
     }
 
     private static func normalizedSidebarStoppedLimit(_ limit: Int) -> Int {
@@ -4607,11 +4416,10 @@ final class UnpeelStore: ObservableObject {
         sidebarVisibleSessionLimit = normalized
     }
 
-    // The idle-session auto-stop-and-archive sweep is Host-owned
-    // (crates/unpeel-serve/src/auto_archive.rs): the worker reads
-    // `auto_stop_archive_minutes` from app-state.json on every sweep and
-    // archives; the app only edits that setting (Settings ▸ Advanced) and
-    // reflects the result on rescan. No app code path archives on its own.
+    // The idle-session auto-stop sweep is Host-owned (unpeel-serve): the
+    // worker reads `auto_stop_archive_minutes` from app-state.json on every
+    // sweep and stops; the app only edits that setting (Settings ▸ Advanced)
+    // and reflects the result on rescan. No app code path stops on its own.
 
     /// The mode the WINDOW should render in: light/dark follows the SELECTED
     /// workspace exactly like the chrome tint does. Scoping into another
@@ -5969,61 +5777,16 @@ final class UnpeelStore: ObservableObject {
             if let confirming = confirmingRemoveSessionID, !liveIDs.contains(confirming) {
                 confirmingRemoveSessionID = nil
             }
-            if let confirming = confirmingArchiveSessionID, !liveIDs.contains(confirming) {
-                confirmingArchiveSessionID = nil
+            if let confirming = confirmingStopSessionID, !liveIDs.contains(confirming) {
+                confirmingStopSessionID = nil
             }
         }
-        // Archived-ids overlay GC: the flag follows the session dir (like the
-        // rename overlay), so a removed/expired session never leaves a stale
-        // entry behind.
-        // Adopt archives written by other frontends (TUI/CLI/phone running
-        // app-lessly); our own archive path writes the same marker.
-        let markerArchived = liveIDs.filter {
-            snapshot.archivedMarkerDirs.contains($0)
-        }
-        let adopted = markerArchived.subtracting(archivedSessionIDs)
-        var archiveOverlayChanged = false
-        if !adopted.isEmpty {
-            archivedSessionIDs.formUnion(adopted)
-            archiveOverlayChanged = true
-        }
-        // Adopt missing recency stamps for ALL marker-backed archives, not
-        // only newly adopted ids. This repairs an old/incomplete overlay and
-        // persists a TUI/CLI archive's newest-first position across relaunch.
-        for sessionID in markerArchived where archivedAtBySession[sessionID] == nil {
-            guard let marker = Self.readSharedMarker(sessionID, .archived),
-                  (marker["stamped"] as? Bool ?? true),
-                  let at = Self.jsonUInt64(marker["archived_at"])
-            else { continue }
-            archivedAtBySession[sessionID] = Int64(clamping: at)
-            archiveOverlayChanged = true
-        }
-        let staleArchived = archivedSessionIDs.subtracting(liveIDs)
-        if !staleArchived.isEmpty {
-            archivedSessionIDs.subtract(staleArchived)
-            archiveOverlayChanged = true
-        }
-        if archiveOverlayChanged {
-            persistArchivedSessionIDs()
-        }
-        // Permanently retire pane links whose Sessions disappeared, exited,
-        // or were archived. validatedPaneGroup is a render-time safety net;
+        // Permanently retire pane links whose Sessions disappeared or
+        // exited. validatedPaneGroup is a render-time safety net;
         // reconciliation frees survivors for another group and repairs the
         // Controller window's persisted layout.
         reconcilePaneLayout()
         reconcileAppPresentations(stateFile?.appPresentations)
-        // A visible "archiving…" row only exists while its stop/reap task is
-        // in flight; anything else (task lost to a guard, session dir gone)
-        // must not strand a phantom row.
-        let keptArchiving = archivingSessionIDs.intersection(
-            stoppingArchivedSessionIDs.intersection(archivedSessionIDs)
-        )
-        // Guarded: an in-place mutation of a @Published set fires
-        // objectWillChange even when nothing changes, which would republish
-        // the whole store on every rescan.
-        if keptArchiving != archivingSessionIDs {
-            archivingSessionIDs = keptArchiving
-        }
         if !sidebarKeepVisibleSessionIDs.isSubset(of: liveIDs) {
             sidebarKeepVisibleSessionIDs.formIntersection(liveIDs)
         }
@@ -6040,9 +5803,9 @@ final class UnpeelStore: ObservableObject {
         rebuildPins(tauriPins: stateFile?.pinnedSessions ?? [:])
         // Shared knobs (app-state.json) — a TUI edit lands here on the next
         // rescan, which the state-bus ping schedules immediately.
-        let stopArchiveMinutes = Self.resolvedAutoStopArchiveMinutes(stateFile)
-        if stopArchiveMinutes != autoStopArchiveMinutes {
-            autoStopArchiveMinutes = stopArchiveMinutes
+        let stopMinutes = Self.resolvedAutoStopMinutes(stateFile)
+        if stopMinutes != autoStopMinutes {
+            autoStopMinutes = stopMinutes
         }
         let stoppedLimit = Self.resolvedSidebarStoppedLimit(stateFile)
         if stoppedLimit != sidebarVisibleSessionLimit {
@@ -6158,10 +5921,6 @@ final class UnpeelStore: ObservableObject {
         let linkAvatar = stateFile?.profileAvatar ?? ""
         if linkAvatar != profileAvatar {
             profileAvatar = linkAvatar
-        }
-
-        if let id = archivedProjectID, projectsByID[id] == nil {
-            archivedProjectID = nil
         }
 
         // Same ownership rule as the session interaction state above: the
@@ -6322,7 +6081,7 @@ final class UnpeelStore: ObservableObject {
             return lastScanSessions
         }
         // The per-dir filesystem pass (enumeration, manifest stat/decode,
-        // output stats, archived markers) happened in the snapshot — on a
+        // output stats, resume evidence) happened in the snapshot — on a
         // background queue for scheduled rescans. This derivation phase
         // stays on the main actor: it reads and mutates live store state.
         let root = LaunchConfig.appSessionsDir.path
@@ -6350,14 +6109,12 @@ final class UnpeelStore: ObservableObject {
             guard let manifest = snapshot.manifests[dirName] else { continue }
 
             // Exited-session fast path: identical manifest, title overrides,
-            // archived marker, and project-override marker mean the derived
+            // resume evidence, and project-override marker mean the derived
             // entry is identical too — exited entries have no live/activity
             // state feeding them. This keeps the on-main apply phase
             // proportional to LIVE sessions, not total history.
             if snapshot.unchangedManifestDirs.contains(dirName),
                overridesUnchangedForReuse,
-               snapshot.archivedMarkerDirs.contains(dirName)
-                   == scanEntryCacheArchivedDirs.contains(dirName),
                scanEntryCache[dirName]?.hasResumableState
                    == snapshot.resumableStateDirs.contains(dirName),
                snapshot.projectOverrideStamps[dirName]
@@ -6695,7 +6452,6 @@ final class UnpeelStore: ObservableObject {
         }
         scanEntryCacheTitleOverrides = loadedTitleOverrides
         scanEntryCacheOverrideStamps = snapshot.projectOverrideStamps
-        scanEntryCacheArchivedDirs = snapshot.archivedMarkerDirs
 
         for id in seen {
             pendingSessions.removeValue(forKey: id)
@@ -6914,14 +6670,12 @@ final class UnpeelStore: ObservableObject {
 
         // History feed: log the live → exited edge. Keyed off statuses this
         // run has already seen, so a startup rescan over long-dead sessions
-        // logs nothing; archiving (which stops the host on purpose) is
-        // deliberately silent too.
+        // logs nothing.
         for (id, session) in index {
             let previous = activityLoggedStatuses[id]
             activityLoggedStatuses[id] = session.status
             if session.status == .exited,
                let previous, previous != .exited,
-               !archivedSessionIDs.contains(id),
                !restartingSessionIDs.contains(id) {
                 logActivity(.exited, sessionID: id)
             }
@@ -6965,13 +6719,12 @@ final class UnpeelStore: ObservableObject {
     }
 
     /// After the first disk scan: reopen the last Local content-pane Session
-    /// if it is still present and visible. Missing/archived ids stay empty.
+    /// if it is still present. Missing ids stay empty.
     private func restorePersistedSessionSelection() {
         guard selectedHostScope == .local, selectedSessionID == nil else { return }
         guard let id = AppDefaults.shared.string(forKey: Self.selectedSessionKey),
               !id.isEmpty,
               let session = sessionsByID[id],
-              !isHiddenArchived(id),
               !sessionIsInProjectSidebar(id)
         else { return }
         prepareSidebarToRenderSession(session)
@@ -7450,9 +7203,9 @@ final class UnpeelStore: ObservableObject {
             overrides.removedKeys.append(key)
         }
         overrides.removedAt[key] = Self.nextPinIntentTimestamp()
-        // Resurface the row instead of dropping it: an old archived Session
+        // Resurface the row instead of dropping it: an old stopped Session
         // lives past the preview window, so a plain unpin used to hide it
-        // outright. Stamp a fresh recency (top of its stopped/archive block,
+        // outright. Stamp a fresh recency (top of its stopped block,
         // right below the live rows) and force it visible past the window.
         sidebarUnpinRecencyBump[sessionID] = Int64(Date().timeIntervalSince1970 * 1_000)
         sidebarKeepVisibleSessionIDs.insert(sessionID)
@@ -8163,17 +7916,10 @@ final class UnpeelStore: ObservableObject {
     /// but no shared/local state is written until `commitSessionReorder`.
     func previewSessionMove(projectID: String, draggedID: String, over targetID: String) {
         guard draggedID != targetID,
-              !sessionIsRecentArchived(draggedID),
-              !sessionIsRecentArchived(targetID),
               let node = findDisplayNode(projectID)
         else { return }
         let pinnedIDs = renderedPinnedItems(in: node).map(\.id)
-        var regularIDs = renderedDisplayedItems(in: node).filter { item in
-            if case .session(let session) = item {
-                return !sessionIsRecentArchived(session.id)
-            }
-            return true
-        }.map(\.id)
+        var regularIDs = renderedDisplayedItems(in: node).map(\.id)
         guard let from = regularIDs.firstIndex(of: draggedID),
               let to = regularIDs.firstIndex(of: targetID)
         else { return }
@@ -8191,16 +7937,12 @@ final class UnpeelStore: ObservableObject {
     /// desktop drag path uses `previewSessionMove` and commits only on drop.
     func moveSession(projectID: String, draggedID: String, over targetID: String) {
         guard draggedID != targetID,
-              !sessionIsRecentArchived(draggedID),
-              !sessionIsRecentArchived(targetID),
               let node = findNode(projectID)
         else { return }
         let pinnedIDs = Set(
             (pinnedByProject[projectID] ?? []).compactMap(\.sessionID)
         )
-        var ids = node.sessions.map(\.id).filter {
-            !pinnedIDs.contains($0) && !sessionIsRecentArchived($0)
-        }
+        var ids = node.sessions.map(\.id).filter { !pinnedIDs.contains($0) }
         guard let from = ids.firstIndex(of: draggedID),
               let to = ids.firstIndex(of: targetID)
         else { return }
@@ -8210,12 +7952,11 @@ final class UnpeelStore: ObservableObject {
     }
 
     func setSessionOrder(projectID: String, ids: [String]) {
-        let regularIDs = ids.filter { !sessionIsRecentArchived($0) }
+        let regularIDs = ids
         // The pinned bucket of the combined shared list is the MIXED
         // partition (session ids and pinned-group ids), so a regular-section
         // commit must not drop the groups' pin ranks.
         let pinnedIDs = (pinnedByProject[projectID] ?? []).compactMap(\.orderTargetID)
-            .filter { !sessionIsRecentArchived($0) }
         let shared = Self.combinedSessionOrder(
             pinnedIDs: pinnedIDs,
             regularIDs: regularIDs
@@ -8249,12 +7990,7 @@ final class UnpeelStore: ObservableObject {
         else { return }
         pinnedIDs.remove(at: from)
         pinnedIDs.insert(draggedID, at: to)
-        let regularIDs = renderedDisplayedItems(in: node).filter { item in
-            if case .session(let session) = item {
-                return !sessionIsRecentArchived(session.id)
-            }
-            return true
-        }.map(\.id)
+        let regularIDs = renderedDisplayedItems(in: node).map(\.id)
         let preview = Self.combinedSessionOrder(
             pinnedIDs: pinnedIDs, regularIDs: regularIDs
         )
@@ -8268,8 +8004,6 @@ final class UnpeelStore: ObservableObject {
     /// the mixed pinned sessions + pinned child groups list.
     func movePinnedSession(projectID: String, draggedID: String, over targetID: String) {
         guard draggedID != targetID,
-              !sessionIsRecentArchived(draggedID),
-              !sessionIsRecentArchived(targetID),
               let node = findNode(projectID)
         else { return }
         var ids = renderedPinnedItems(in: node).map(\.id)
@@ -8286,15 +8020,10 @@ final class UnpeelStore: ObservableObject {
     /// list, and the durable `pinned_sessions` records array all receive
     /// the same new order.
     func setPinnedOrder(projectID: String, ids: [String]) {
-        let orderableIDs = ids.filter { !sessionIsRecentArchived($0) }
+        let orderableIDs = ids
         let pinned = Set(orderableIDs)
         let regularIDs = findNode(projectID).map { node in
-            renderedDisplayedItems(in: node).filter { item in
-                if case .session(let session) = item {
-                    return !sessionIsRecentArchived(session.id)
-                }
-                return true
-            }.map(\.id).filter { !pinned.contains($0) }
+            renderedDisplayedItems(in: node).map(\.id).filter { !pinned.contains($0) }
         } ?? []
         let shared = Self.combinedSessionOrder(
             pinnedIDs: orderableIDs,
@@ -8347,9 +8076,7 @@ final class UnpeelStore: ObservableObject {
     }
 
     /// Raw-JSON reorder of one project's `pinned_sessions` rows, used
-    /// inside the app-state lock. Rows not named by the order (for
-    /// example archived pinned sessions, whose durable pin must survive)
-    /// keep their relative order below the ranked block. Unknown shapes
+    /// inside the app-state lock. Rows not named by the order keep their relative order below the ranked block. Unknown shapes
     /// return false and leave the object untouched.
     @discardableResult
     static func applyPinnedRecordOrder(
@@ -8448,7 +8175,6 @@ final class UnpeelStore: ObservableObject {
             }
             let orderedIDs = (renderedPinnedSessions(in: node)
                 + renderedDisplayedSessions(in: node))
-                .filter { !sessionIsRecentArchived($0.id) }
                 .map(\.id)
             remoteSessionOrderByProject[projectID] = orderedIDs
             let workspaceKey = workspacePoolForegroundKey()
@@ -8500,12 +8226,7 @@ final class UnpeelStore: ObservableObject {
             renderedPinnedItems(in: $0).map(\.id)
         } ?? []
         let regularIDs = findNode(projectID).map {
-            renderedDisplayedItems(in: $0).filter { item in
-                if case .session(let session) = item {
-                    return !sessionIsRecentArchived(session.id)
-                }
-                return true
-            }.map(\.id)
+            renderedDisplayedItems(in: $0).map(\.id)
         } ?? []
         sessionOrderPreviews.removeValue(forKey: projectID)
         if pinned {
@@ -8938,7 +8659,6 @@ final class UnpeelStore: ObservableObject {
     private func terminalSurfaceIsMounted(for sessionID: String) -> Bool {
         guard selectedHostScope == .local,
               !settingsVisible,
-              archivedProjectID == nil,
               !recentActivityVisible
         else { return false }
 
@@ -9151,9 +8871,8 @@ final class UnpeelStore: ObservableObject {
     // MARK: - Remove session (kill_session, pty_manager.rs:1701-1753)
 
     /// Session id whose sidebar row is showing the inline "Remove session?"
-    /// confirm state (one at a time, like confirmingArchiveId in
-    /// ProjectItem.svelte:158/1009-1024 — the native version swaps the whole
-    /// row instead of just the button).
+    /// confirm state (one at a time; the native version swaps the whole row
+    /// instead of just the button).
     @Published var confirmingRemoveSessionID: String? {
         didSet {
             if confirmingRemoveSessionID == nil {
@@ -9161,16 +8880,6 @@ final class UnpeelStore: ObservableObject {
             }
         }
     }
-
-    /// Which surface asked for the pending remove-confirm. The sidebar row
-    /// and the archive-page card share `confirmingRemoveSessionID`, but only
-    /// the requesting surface may render the inline confirm — the confirm UI
-    /// mounts a click-away dismiss monitor scoped to its own row, so a
-    /// mirrored confirm on the *other* surface cancels the whole thing on
-    /// the very mouse-down aimed at this surface's Delete button (that made
-    /// every archive-page delete a no-op until 2026-08-06).
-    enum RemoveConfirmSurface { case sidebar, archivePage }
-    @Published private(set) var confirmingRemoveSurface: RemoveConfirmSurface = .sidebar
 
     /// Sessions whose kill/cleanup is in flight; rows render disabled.
     @Published private(set) var removingSessionIDs: Set<String> = []
@@ -9185,19 +8894,15 @@ final class UnpeelStore: ObservableObject {
     private var purgedSessionDirs: [String: Date] = [:]
     private static let purgedSessionDirTTL: TimeInterval = 180
 
-    func requestRemoveSession(
-        _ sessionID: String, from surface: RemoveConfirmSurface = .sidebar
-    ) {
+    func requestRemoveSession(_ sessionID: String) {
         // A dead row with no resumable conversation is just clutter — Remove
         // clears it instantly. The confirm exists for losing something: a
-        // live terminal, or a conversation that could still resume. Archive
-        // rows keep it — those were deliberately kept.
-        if surface == .sidebar, !sessionRemovalNeedsConfirmation(sessionID) {
+        // live terminal, or a conversation that could still resume.
+        if !sessionRemovalNeedsConfirmation(sessionID) {
             confirmRemoveSession(sessionID)
             return
         }
-        confirmingArchiveSessionID = nil
-        confirmingRemoveSurface = surface
+        confirmingStopSessionID = nil
         confirmingRemoveSessionID = sessionID
     }
 
@@ -9206,11 +8911,10 @@ final class UnpeelStore: ObservableObject {
     /// be resumed. Unknown ids fail toward confirming.
     func sessionRemovalNeedsConfirmation(_ sessionID: String) -> Bool {
         if let summary = remoteSummariesByID[sessionID] {
-            return summary.status == .running
-                || summary.capabilities?.archive == true
+            return summary.status == .running || sessionIsResumable(sessionID)
         }
         guard let session = sessionsByID[sessionID] else { return true }
-        return session.isLive || ProviderCapabilities.canArchive(session: session)
+        return session.isLive || sessionIsResumable(sessionID)
     }
 
     func cancelRemoveConfirm() {
@@ -9361,8 +9065,10 @@ final class UnpeelStore: ObservableObject {
         saveSessionTitleOverrides(titles)
     }
 
-    /// User-visible stop: kill the hosted PTY but keep the session directory
-    /// and output history, so it remains in the sidebar as restartable.
+    /// User-visible stop: kill the hosted PTY but keep the Session (manifest
+    /// and provider conversation id), so it remains in the sidebar as a
+    /// stopped row that Resume continues. The Host drops the scrollback once
+    /// the child exits.
     func stopSession(_ sessionID: String) -> Bool {
         guard remoteHostRuntime.supportsHostOperation(
             RemoteHostRuntime.HostOperation.stop
@@ -9575,7 +9281,6 @@ final class UnpeelStore: ObservableObject {
         guard let summary = remoteSummary(for: sessionID) else { return }
         let entry = remoteSessionsByID[sessionID] ?? Self.sessionEntry(fromRemote: summary)
         let known = Set(remoteSummariesByID.keys)
-            .union(remoteArchivedSummaryCache.sessionIDs)
         var sharedOrder: [String] = []
         if case .local = selectedHostScope {
             sharedOrder = Self.sharedSessionOrder(projectID: summary.projectID) ?? []
@@ -9669,9 +9374,6 @@ final class UnpeelStore: ObservableObject {
     @discardableResult
     func resumeAgentOrSession(_ sessionID: String) -> Bool {
         guard let session = displaySessionsByID[sessionID] else { return false }
-        if sessionIsRecentArchived(sessionID) {
-            return resumeArchivedSession(sessionID)
-        }
         return session.isLive ? resumeAgent(sessionID) : restartSession(sessionID)
     }
 
@@ -9999,7 +9701,7 @@ final class UnpeelStore: ObservableObject {
         }
         guard let session = sessionsByID[sessionID] else { return false }
         guard session.status == .exited else { return false }
-        return ProviderCapabilities.canArchive(session: session)
+        return ProviderCapabilities.isResumable(session: session)
     }
 
     /// A live App Session can be restarted in place: the same command runs
@@ -10038,18 +9740,31 @@ final class UnpeelStore: ObservableObject {
         }
     }
 
-    /// Archive remains available for any resumable launch regardless of live
-    /// state. It is separate from stopped-only Resume and live Resume Agent.
-    func sessionCanArchive(_ sessionID: String) -> Bool {
+    /// The sidebar's Stop is offered for a live, resumable launch: the
+    /// stopped row it leaves behind can Resume the conversation. Live
+    /// launches with nothing to resume get Remove instead.
+    func sessionCanStop(_ sessionID: String) -> Bool {
         if routesSessionVerbThroughHost(sessionID),
            let summary = remoteSummariesByID[sessionID] {
-            return summary.capabilities?.archive == true
+            return summary.status == .running
+                && sessionIsResumable(sessionID)
                 && remoteHostRuntime.supportsHostOperation(
-                    RemoteHostRuntime.HostOperation.archive
+                    RemoteHostRuntime.HostOperation.stop
                 )
         }
         guard let session = sessionsByID[sessionID] else { return false }
-        return ProviderCapabilities.canArchive(session: session)
+        return session.isLive && sessionIsResumable(sessionID)
+    }
+
+    /// Host resume evidence: this launch created a conversation a later
+    /// Resume can continue (`capabilities.resumable` on the wire; older
+    /// Hosts that predate it read as not resumable).
+    func sessionIsResumable(_ sessionID: String) -> Bool {
+        if let summary = remoteSummariesByID[sessionID] {
+            return summary.capabilities?.resumable == true
+        }
+        guard let session = sessionsByID[sessionID] else { return false }
+        return ProviderCapabilities.isResumable(session: session)
     }
 
     /// Whether the live Session can resume its stable managed launch inside
@@ -10214,7 +9929,6 @@ final class UnpeelStore: ObservableObject {
             }
             AppDefaults.shared.removeObject(forKey: Self.sessionOrderKey(id))
             AppDefaults.shared.removeObject(forKey: Self.pinnedOrderKey(id))
-            if archivedProjectID == id { archivedProjectID = nil }
             if let selected = selectedSessionID,
                sessionsByID[selected]?.projectID == id {
                 selectedSessionID = nil
@@ -10324,7 +10038,6 @@ final class UnpeelStore: ObservableObject {
             projectFolderColorIDs.removeValue(forKey: id)
             AppDefaults.shared.removeObject(forKey: Self.sessionOrderKey(id))
             AppDefaults.shared.removeObject(forKey: Self.pinnedOrderKey(id))
-            if archivedProjectID == id { archivedProjectID = nil }
         }
         saveProjectFolderColorIDs()
         pruneProjectOrderOverlays(removing: removedIDs)
@@ -10370,7 +10083,6 @@ final class UnpeelStore: ObservableObject {
                 object["projects"] = projects
             }
         }
-        if archivedProjectID == projectID { archivedProjectID = nil }
         if let selected = selectedSessionID,
            displaySessionsByID[selected]?.projectID == projectID {
             selectedSessionID = nil
@@ -10573,7 +10285,6 @@ final class UnpeelStore: ObservableObject {
             expandedProjectIDs.remove(id)
             projectFolderColorIDs.removeValue(forKey: id)
             sessionOrderPreviews.removeValue(forKey: id)
-            if archivedProjectID == id { archivedProjectID = nil }
         }
         saveProjectFolderColorIDs()
         if let selected = selectedSessionID,
@@ -11628,10 +11339,10 @@ final class UnpeelStore: ObservableObject {
         }
     }
 
-    /// Remove a group: unpin and rehome every session under its parent, then
-    /// archive only the ones with real resume state. A failed/empty agent
-    /// launch remains visible under the parent rather than being mislabeled
-    /// as a recoverable archive or deleted as a side effect of group removal.
+    /// Remove a group: unpin and rehome every session under its parent. The
+    /// sessions themselves are untouched — live ones keep running and stopped
+    /// ones keep their Resume — so removing the organizational record never
+    /// stops or deletes anything. Returns the number of sessions moved.
     /// Controller callers already confirmed and pass `confirm: false`.
     @discardableResult
     func removeGroupProject(_ projectID: String, confirm: Bool = true) -> Int? {
@@ -11650,19 +11361,14 @@ final class UnpeelStore: ObservableObject {
             let parentName = projectsByID[parentID]?.name ?? "the parent project"
             let alert = NSAlert()
             alert.messageText = "Remove group?"
-            alert.informativeText = "\(count) \(noun) will move under \(parentName). Resumable conversations will also be archived."
+            alert.informativeText = "\(count) \(noun) will move under \(parentName)."
             alert.addButton(withTitle: "Remove Group")
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return nil }
         }
-        var archivedCount = 0
         for session in members {
             unpinSession(projectID: projectID, sessionID: session.id)
             moveSession(session.id, toProjectID: parentID)
-            if sessionCanArchive(session.id) {
-                archiveSession(session.id)
-                archivedCount += 1
-            }
         }
         var records = loadNativeProjects()
         if records.contains(where: { $0.id == projectID }) {
@@ -11679,14 +11385,14 @@ final class UnpeelStore: ObservableObject {
             }
         }
         rescan()
-        return archivedCount
+        return members.count
     }
 
     /// `.localWorkspace` Remove group: the member Sessions ride the Host's
-    /// move/archive verbs (awaited in order, so the Host still knows the
-    /// group while it re-files them), then the organizational record leaves
-    /// the scoped home's own records and `app-state.json`. Returns the number
-    /// of members that will be archived (the count the confirm quoted).
+    /// move verb (awaited in order, so the Host still knows the group while
+    /// it re-files them), then the organizational record leaves the scoped
+    /// home's own records and `app-state.json`. Returns the number of
+    /// members moved.
     private func removeScopedWorkspaceGroup(_ projectID: String, confirm: Bool) -> Int? {
         guard let project = displayProjectsByID[projectID],
               let parentID = project.parentProjectID,
@@ -11701,23 +11407,19 @@ final class UnpeelStore: ObservableObject {
             let parentName = displayProjectsByID[parentID]?.name ?? "the parent project"
             let alert = NSAlert()
             alert.messageText = "Remove group?"
-            alert.informativeText = "\(count) \(noun) will move under \(parentName). Resumable conversations will also be archived."
+            alert.informativeText = "\(count) \(noun) will move under \(parentName)."
             alert.addButton(withTitle: "Remove Group")
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return nil }
         }
-        let archivable = members.filter { sessionCanArchive($0.id) }.map(\.id)
         let memberIDs = members.map(\.id)
         performRemoteVerb("Couldn't remove the group") { [weak self] runtime in
             for sessionID in memberIDs {
                 try await runtime.setSessionProject(sessionID, projectID: parentID)
             }
-            for sessionID in archivable {
-                try await runtime.archiveSession(sessionID)
-            }
             self?.removeScopedWorkspaceProject(projectID)
         }
-        return archivable.count
+        return memberIDs.count
     }
 
     /// Whether a session row in a DATE-SORTED list still participates in the
@@ -11923,7 +11625,6 @@ final class UnpeelStore: ObservableObject {
     func canSplitTerminal(with draggedID: String) -> Bool {
         guard selectedHostScope.supportsSessionPanes,
               !settingsVisible,
-              archivedProjectID == nil,
               !recentActivityVisible,
               let shownID = selectedSessionID,
               shownID != draggedID,
@@ -11988,7 +11689,6 @@ final class UnpeelStore: ObservableObject {
     /// creates a Session. Existing-session panes work in every Host scope.
     func canOpenPaneLauncher() -> Bool {
         guard !settingsVisible,
-              archivedProjectID == nil,
               !recentActivityVisible,
               let shownID = selectedSessionID,
               let shown = displaySessionsByID[shownID],
@@ -12173,8 +11873,7 @@ final class UnpeelStore: ObservableObject {
         guard selectedHostScope == .local else { return }
         reconcilePaneLayout(eligibleSessionIDs: Set(
             sessionsByID.values.compactMap { session in
-                guard !archivedSessionIDs.contains(session.id),
-                      !removingSessionIDs.contains(session.id),
+                guard !removingSessionIDs.contains(session.id),
                       session.isAttachable || session.status == .starting
                 else { return nil }
                 return session.id
@@ -12231,9 +11930,7 @@ final class UnpeelStore: ObservableObject {
             let caller = displaySessionsByID[presentation.callerSessionID],
             let companion = displaySessionsByID[instance.companionSessionID],
             caller.isAttachable,
-            companion.isAttachable,
-            !isHiddenArchived(caller.id),
-            !isHiddenArchived(companion.id)
+            companion.isAttachable
             else { continue }
 
             let location: PaneLocation?
@@ -12469,7 +12166,6 @@ final class UnpeelStore: ObservableObject {
     /// transitions keep the ordinary Close Window behavior.
     var canCloseActiveTerminalPane: Bool {
         guard !settingsVisible,
-              archivedProjectID == nil,
               !recentActivityVisible,
               let shownID = selectedSessionID,
               let shown = displaySessionsByID[shownID]
@@ -14081,7 +13777,6 @@ final class UnpeelStore: ObservableObject {
 
         let projectID = ensureProject(path: path)
         settingsVisible = false
-        archivedProjectID = nil
         expandedProjectIDs.insert(projectID)
     }
 
@@ -14121,39 +13816,17 @@ final class UnpeelStore: ObservableObject {
         guard selectedHostScope.isLocalMachine else { return }
         let projectID = ensureProject(path: path)
         settingsVisible = false
-        archivedProjectID = nil
         selectedSessionID = nil
         expandedProjectIDs.insert(projectID)
         launcherProjectID = projectID
     }
 
-    /// Project context-menu destination for archived sessions. This is a
-    /// main-pane library, not another sidebar accordion.
-    func openArchivedSessions(projectID: String) {
-        guard displayProjectsByID[projectID] != nil else { return }
-        settingsVisible = false
-        launcherProjectID = nil
-        recentActivityVisible = false
-        archivedProjectID = projectID
-        // Remote projects fetch their archive library from the Host
-        // (`session.archive.list`); the page renders from the cached fetch.
-        if remoteProjectSummariesByID[projectID] != nil {
-            refreshRemoteArchivedSessions(projectID: projectID)
-        }
-    }
-
-    func closeArchivedSessions() {
-        archivedProjectID = nil
-    }
-
     /// "All recent" destination from the titlebar/menu-bar activity
-    /// dropdowns: the app-wide history page in the main pane, same shell as
-    /// the archived-sessions library.
+    /// dropdowns: the app-wide history page in the main pane.
     func openRecentActivity() {
         guard selectedHostScope == .local else { return }
         settingsVisible = false
         launcherProjectID = nil
-        archivedProjectID = nil
         recentActivityVisible = true
     }
 
@@ -14383,7 +14056,7 @@ final class UnpeelStore: ObservableObject {
         return hostPrefix + [project.name]
     }
 
-    /// Title-strip segments while a main-pane library (All recent, Archived)
+    /// Title-strip segments while a main-pane library (All recent)
     /// covers the workspace; nil for the workspace itself.
     /// Whether the window title strip is shown above the content. With the
     /// sidebar open, the workspace's terminal panes run to the window top
@@ -14398,10 +14071,6 @@ final class UnpeelStore: ObservableObject {
     var libraryTitlebarSegments: [String]? {
         if recentActivityVisible {
             return ["Recent"]
-        }
-        if let id = archivedProjectID, let project = displayProjectsByID[id] {
-            let count = archivedSessions(projectID: project.id).count
-            return [project.name, "Archived (\(count))"]
         }
         return nil
     }
@@ -14480,27 +14149,15 @@ final class UnpeelStore: ObservableObject {
 
     // MARK: - Sidebar session lists (shared with ProjectNodeView)
 
-    /// Whether this session is hidden from the regular sidebar lists.
-    /// Archives whose host stop is still in flight stay visible (as a muted
-    /// "archiving…" row) until the stop completes.
-    private func isHiddenArchived(_ sessionID: String) -> Bool {
-        // Remote rows: the Host already filtered/windowed the bootstrap, so
-        // a Controller never applies its own local archive overlay to them.
-        if remoteSummariesByID[sessionID] != nil { return false }
-        return archivedSessionIDs.contains(sessionID)
-            && !archivingSessionIDs.contains(sessionID)
-    }
-
     /// Pins resolved against the node's sessions, mirroring
     /// resolvedPinnedItems in ProjectItem.svelte:405-423.
     func pinnedSessions(in node: ProjectNode) -> [SessionEntry] {
         // Remote nodes: pins are Host-resolved flags on the summaries, in
-        // the Host's own row order; archive status overrides a retained pin.
-        // An in-flight drag previews on top for the remaining pinned rows.
+        // the Host's own row order. An in-flight drag previews on top for
+        // the remaining pinned rows.
         if remoteProjectSummariesByID[node.id] != nil {
             let pinned = node.sessions.filter {
                 remoteSummariesByID[$0.id]?.pinned == true
-                    && !sessionIsRecentArchived($0.id)
             }
             guard let preview = sessionOrderPreviews[node.id] else { return pinned }
             var rank: [String: Int] = [:]
@@ -14511,67 +14168,20 @@ final class UnpeelStore: ObservableObject {
         }
         return (pinnedByProject[node.id] ?? []).compactMap { pin in
             guard let id = pin.sessionID else { return nil }
-            // Keep the durable pin so Restore can put the row back where the
-            // user left it, but while archived it belongs to the fixed bottom
-            // archive section rather than the pinned section.
-            guard !sessionIsRecentArchived(id) else { return nil }
             return node.sessions.first { $0.id == id }
         }
     }
 
-    /// The regular-only projection excludes pinned and archived rows.
-    /// `sidebarLists` applies the shared inactive window after adding archived
-    /// rows back; the project archive page exposes the complete filed set.
+    /// The regular-only projection excludes pinned rows. `sidebarLists`
+    /// applies the shared inactive window on top of it.
     func regularSessions(in node: ProjectNode) -> [SessionEntry] {
         let pinnedIDs = Set(pinnedSessions(in: node).map(\.id))
-        return node.sessions.filter {
-            !pinnedIDs.contains($0.id) && !isHiddenArchived($0.id)
-        }
-    }
-
-    /// This project's archived sessions, newest-filed first. Manual order is
-    /// deliberately ignored for Archive; in-flight archives are excluded
-    /// until their host stop completes (they still render as a sidebar row).
-    func archivedSessions(in node: ProjectNode) -> [SessionEntry] {
-        node.sessions
-            .filter { isHiddenArchived($0.id) }
-            .sorted {
-                let left = archiveSidebarRecency($0)
-                let right = archiveSidebarRecency($1)
-                return left == right ? $0.id < $1.id : left > right
-            }
-    }
-
-    private func archiveSidebarRecency(_ session: SessionEntry) -> Int64 {
-        max(
-            max(session.createdAt, session.lifecycleAtMs ?? 0),
-            max(
-                archivedAtBySession[session.id] ?? 0,
-                sidebarUnpinRecencyBump[session.id] ?? 0
-            )
-        )
-    }
-
-    func archivedSessions(projectID: String) -> [SessionEntry] {
-        // Remote projects: the fetched Host archive library (empty until the
-        // fetch lands or when the Host has none).
-        if remoteProjectSummariesByID[projectID] != nil {
-            return remoteArchivedByProject[projectID] ?? []
-        }
-        return localArchivedSessions(projectID: projectID)
-    }
-
-    /// Local-only archive lookup for the /mobile Host serving path, which
-    /// must keep serving THIS Mac's archives even while a remote Host is
-    /// selected in the picker.
-    func localArchivedSessions(projectID: String) -> [SessionEntry] {
-        guard let node = findNode(projectID) else { return [] }
-        return archivedSessions(in: node)
+        return node.sessions.filter { !pinnedIDs.contains($0.id) }
     }
 
     /// The sidebar's row list for a group: pins first, then live sessions,
-    /// then at most the configured number of naturally stopped and archived
-    /// sessions combined (default five). Recently updated uses the shared
+    /// then at most the configured number of stopped sessions (default
+    /// five). Recently updated uses the shared
     /// lifecycle rank inside each section; Custom keeps manual order for live
     /// rows. Selected, unread, and in-flight inactive rows stay past the window.
     func displayedSessions(in node: ProjectNode) -> [SessionEntry] {
@@ -14715,23 +14325,6 @@ final class UnpeelStore: ObservableObject {
                 return true
             }
         }
-        // Folder/manual ordering applies only to the regular section.
-        // Archived sessions have no drag slots and always form the final
-        // newest-first section, after every folder and non-archived row.
-        func archivedSessionsLast(_ items: [SidebarMixedItem]) -> [SidebarMixedItem] {
-            let archived = items.filter { item in
-                if case .session(let session) = item {
-                    return sessionIsRecentArchived(session.id)
-                }
-                return false
-            }
-            return items.filter { item in
-                if case .session(let session) = item {
-                    return !sessionIsRecentArchived(session.id)
-                }
-                return true
-            } + archived
-        }
         guard !folders.isEmpty else {
             return sessions.map { .session($0) }
         }
@@ -14751,9 +14344,9 @@ final class UnpeelStore: ObservableObject {
         let folderIDs = Set(folders.map(\.id))
         let mixed = order.contains { folderIDs.contains($0) }
         if (dateSorted && sessionOrderPreviews[node.id] == nil) || !mixed {
-            return archivedSessionsLast(pinnedGroupsFirst(
+            return pinnedGroupsFirst(
                 folders.map { .folder($0) } + sessions.map { .session($0) }
-            ))
+            )
         }
         var byID: [String: SidebarMixedItem] = [:]
         for folder in folders { byID[folder.id] = .folder(folder) }
@@ -14772,9 +14365,7 @@ final class UnpeelStore: ObservableObject {
         let unrankedFolders = folders
             .filter { !seen.contains($0.id) }
             .map { SidebarMixedItem.folder($0) }
-        return archivedSessionsLast(
-            pinnedGroupsFirst(unrankedSessions + unrankedFolders + ranked)
-        )
+        return pinnedGroupsFirst(unrankedSessions + unrankedFolders + ranked)
     }
 
     /// Flat session rows plus the inactive-only projection used for sidebar
@@ -14784,9 +14375,6 @@ final class UnpeelStore: ObservableObject {
         in node: ProjectNode
     ) -> (ordered: [[SessionEntry]], stopped: [[SessionEntry]]) {
         let pinnedRenderedIDs = Set(pinnedSessions(in: node).map(\.id))
-        // Archived rows remain eligible for the fixed inactive preview at the
-        // bottom. `pinnedSessions` excludes them because Archive overrides a
-        // retained pin until the Session is restored.
         let candidates = node.sessions.filter {
             !pinnedRenderedIDs.contains($0.id)
         }
@@ -14826,12 +14414,7 @@ final class UnpeelStore: ObservableObject {
         let blocks = ordered.map { [$0] }
         var active: [[SessionEntry]] = []
         var stopped: [[SessionEntry]] = []
-        var archived: [[SessionEntry]] = []
         for block in blocks {
-            if block.contains(where: { sessionIsRecentArchived($0.id) }) {
-                archived.append(block)
-                continue
-            }
             // A restarting (Resume clicked) block is active-in-waiting: it
             // moves to its active-group position immediately instead of
             // sitting in the stopped group until the replacement spawns —
@@ -14864,13 +14447,7 @@ final class UnpeelStore: ObservableObject {
             }.map(\.element)
         }
         let sortedStopped = newestFirst(stopped, recency: lifecycleRecency)
-        let sortedArchived = newestFirst(archived) { block in
-            block.map { archiveSidebarRecency($0) }.max() ?? 0
-        }
-        return (
-            active + sortedStopped + sortedArchived,
-            sortedStopped + sortedArchived
-        )
+        return (active + sortedStopped, sortedStopped)
     }
 
     /// Whether an inactive row must stay in the sidebar past the preview.
@@ -14879,14 +14456,10 @@ final class UnpeelStore: ObservableObject {
             session.id == selectedSessionID
                 || sessionIsUnread(session.id)
                 || sidebarKeepVisibleSessionIDs.contains(session.id)
-                || archivingSessionIDs.contains(session.id)
                 || removingSessionIDs.contains(session.id)
                 || restartingSessionIDs.contains(session.id)
-                // Archive-page confirms render on the archive page only; no
-                // need to drag the row into the sidebar for them.
-                || (confirmingRemoveSessionID == session.id
-                    && confirmingRemoveSurface == .sidebar)
-                || confirmingArchiveSessionID == session.id
+                || confirmingRemoveSessionID == session.id
+                || confirmingStopSessionID == session.id
                 || editingSessionID == session.id
         }
     }
@@ -15216,7 +14789,6 @@ final class UnpeelStore: ObservableObject {
             revealSessionInSidebar(target)
         } else {
             settingsVisible = false
-            archivedProjectID = nil
             selectedSessionID = nil
             launcherProjectID = projectID
         }
@@ -15393,7 +14965,6 @@ final class UnpeelStore: ObservableObject {
             else { return }
             settingsVisible = false
             recentActivityVisible = false
-            archivedProjectID = nil
             selectedSessionID = nil
             expandedProjectIDs.insert(projectID)
             launcherProjectID = projectID
@@ -15556,7 +15127,7 @@ extension UnpeelStore {
     }
 
     private func remoteSummary(for sessionID: String) -> RemoteSessionSummary? {
-        remoteSummariesByID[sessionID] ?? remoteArchivedSummaryCache[sessionID]
+        remoteSummariesByID[sessionID]
     }
 
     /// Name of the selected non-local scope for the green host button,
@@ -15644,19 +15215,8 @@ extension UnpeelStore {
         return unreadSessionIDs.contains(sessionID)
     }
 
-    /// An archived row that still renders in the inactive preview (or
-    /// because it is pinned); its affordances swap to Restore.
-    func sessionIsRecentArchived(_ sessionID: String) -> Bool {
-        // Restore & Resume holds the (previously archived) row as a live-in-
-        // waiting sidebar row until the Host publishes the replacement.
-        if remoteRestartPlaceholders[sessionID] != nil { return false }
-        if let summary = remoteSummary(for: sessionID) { return summary.archived }
-        return archivedSessionIDs.contains(sessionID)
-            && !archivingSessionIDs.contains(sessionID)
-    }
-
     /// The memoized sidebar projection depends on selection only when a local
-    /// stopped/archive row may be retained beyond the configured preview.
+    /// stopped row may be retained beyond the configured preview.
     /// Kept pure so the hot-path guard stays independently testable.
     nonisolated static func selectionChangeAffectsSidebarLists(
         from oldSessionID: String?,
@@ -15667,15 +15227,6 @@ extension UnpeelStore {
         return [oldSessionID, newSessionID].compactMap { $0 }.contains { id in
             windowedInactiveSessionIDs.contains(id)
         }
-    }
-
-    /// Archive-library size for the project context menu. Remote projects
-    /// carry the Host-computed count; local counts the archived rows.
-    func archivedSessionCount(in node: ProjectNode) -> Int {
-        if let summary = remoteProjectSummariesByID[node.id] {
-            return summary.archivedSessionCount ?? 0
-        }
-        return archivedSessions(in: node).count
     }
 
     /// Scope-neutral node lookup for verbs that operate on the displayed tree.
@@ -15895,7 +15446,7 @@ extension UnpeelStore {
                 sharedOrder: placeholder.sharedOrder,
                 isRunningRow: { id in
                     guard let row = summaries[id] else { return false }
-                    return row.status == .running && !row.archived && !row.pinned
+                    return row.status == .running && !row.pinned
                 },
                 isSessionRow: { summaries[$0] != nil },
                 createdAt: { summaries[$0]?.createdAtUnixMs ?? 0 }
@@ -16018,8 +15569,7 @@ extension UnpeelStore {
         if selectedHostScope != .local || projectsLocalHost {
             reconcilePaneLayout(eligibleSessionIDs: Set(
                 projectedSessions.values.compactMap { session in
-                    guard summaries[session.id]?.archived != true,
-                          !removingSessionIDs.contains(session.id),
+                    guard !removingSessionIDs.contains(session.id),
                           session.isAttachable || session.status == .starting
                     else { return nil }
                     return session.id
@@ -16099,18 +15649,6 @@ extension UnpeelStore {
            selectedSessionID != remoteHostRuntime.selectedSessionID {
             selectedSessionID = remoteHostRuntime.selectedSessionID
         }
-        // A removed/archived-away id can linger in the archived cache; prune
-        // fetched libraries for projects that vanished from the Host.
-        // Every write below publishes to the whole store's observers, and this
-        // runs on each 2s Host refresh: only write what actually changed, or
-        // an open context menu in the sidebar is torn down every refresh.
-        let prunedArchived = remoteArchivedByProject.filter {
-            knownProjectIDs.contains($0.key)
-        }
-        if prunedArchived != remoteArchivedByProject {
-            remoteArchivedByProject = prunedArchived
-        }
-        remoteArchivedSummaryCache.retainProjects(knownProjectIDs)
         if projectsLocalHost {
             saveStartupPresentation(nodes: newNodes, summaries: snapshot.sessions)
             if !localHostProjectionReady {
@@ -16183,10 +15721,8 @@ extension UnpeelStore {
         remoteSessionsByID = [:]
         remoteProjectsByID = [:]
         remoteSummariesByID = [:]
-        remoteArchivedSummaryCache.removeAll()
         remoteProjectSummariesByID = [:]
         remoteSessionOrderByProject = [:]
-        remoteArchivedByProject = [:]
         remotePresetSummaries = []
         remotePresets = []
         remoteQuickPresetGroups = []
@@ -16232,7 +15768,7 @@ extension UnpeelStore {
                 )
             },
             runtimeLaunchPending: summary.runtimeLaunchPending,
-            hasResumableState: summary.capabilities?.archive == true,
+            hasResumableState: summary.capabilities?.resumable == true,
             lifecycleAtMs: max(
                 summary.createdAtUnixMs,
                 summary.updatedAtUnixMs ?? 0
@@ -16300,27 +15836,6 @@ extension UnpeelStore {
         // replays the swap as a visible late move.
         invalidateSidebarLists()
         objectWillChange.send()
-    }
-
-    /// Fetch (or refresh) one remote project's archive library.
-    func refreshRemoteArchivedSessions(projectID: String) {
-        let pageGeneration = remoteArchivePageGeneration
-        let hostID = selectedHostScope.remoteHostID
-        performRemoteVerb("Couldn't load archived sessions") { [weak self] runtime in
-            let sessions = try await runtime.archivedSessions(projectID: projectID)
-            guard let self,
-                  self.selectedHostScope.remoteHostID == hostID,
-                  self.archivedProjectID == projectID,
-                  self.remoteArchivePageGeneration == pageGeneration
-            else { return }
-            self.remoteArchivedSummaryCache.replaceProject(
-                projectID,
-                summaries: sessions
-            )
-            self.remoteArchivedByProject[projectID] = sessions.map {
-                Self.sessionEntry(fromRemote: $0)
-            }
-        }
     }
 }
 
@@ -16652,10 +16167,8 @@ struct ScanDiskSnapshot {
     var manifests: [String: HostedSessionManifest] = [:]
     /// dirName → output.bin size, for running manifests only.
     var outputSignals: [String: UInt64] = [:]
-    /// dirNames whose archived marker file exists.
-    var archivedMarkerDirs: Set<String> = []
     /// Dirs whose managed runtime has produced a provider conversation or
-    /// provider-owned storage. This is the effective Archive/Resume gate.
+    /// provider-owned storage. This is the effective Stop/Resume gate.
     var resumableStateDirs: Set<String> = []
     /// Purge-tombstoned dirs whose TTL expired during collection; the main
     /// thread drops them from `purgedSessionDirs`.
@@ -16741,11 +16254,6 @@ final class ScanSnapshotCollector: @unchecked Sendable {
             if manifest.state == "running",
                let outputStamp = UnpeelStore.statFile(dirPath + "/output.bin") {
                 snapshot.outputSignals[dirName] = UInt64(clamping: outputStamp.size)
-            }
-            if access(
-                dirPath + "/" + UnpeelStore.SharedMarker.archived.rawValue, F_OK
-            ) == 0 {
-                snapshot.archivedMarkerDirs.insert(dirName)
             }
             if UnpeelStore.hasDurableResumeEvidence(
                 manifest: manifest,

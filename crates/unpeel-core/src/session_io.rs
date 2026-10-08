@@ -1197,7 +1197,7 @@ impl SessionTeardown {
         // Remove the sockets before the (possibly slow) manifest write. The
         // socket is what every reader probes for liveness, and unlinking it
         // needs no disk space; do it first so a Session whose disk is full
-        // reads as dead at once instead of drawing an auto-archive retry loop
+        // reads as dead at once instead of drawing an auto-stop retry loop
         // for the whole time the manifest write is failing.
         let _ = fs::remove_file(socket_path(&shared.session_id));
         let _ = fs::remove_file(&exit.session_socket_path);

@@ -2114,7 +2114,7 @@ pub fn compact_exited_output_journals() -> Result<OutputJournalCompaction, Strin
         if !entry_type.is_dir() {
             continue;
         }
-        // Removal, archive, restore, and Host replacement all use this same
+        // Removal, stop, and Host replacement all use this same
         // cross-process lease. Revalidate everything only after acquiring it:
         // otherwise a concurrent Remove could delete the directory between
         // our scan and marker publication, and create_dir_all would resurrect
@@ -4707,7 +4707,8 @@ fn retry_manifest_write(
 pub enum ReapReason {
     /// The session's manifest is already `exited`.
     Exited,
-    /// The session has been archived (an `archived.json` marker is present).
+    /// A legacy `archived.json` marker from an older Host sits beside a
+    /// running manifest (archive stopped the session but the host lingered).
     Archived,
 }
 
@@ -4730,7 +4731,7 @@ pub struct ReapedHost {
 }
 
 /// Terminate per-process session hosts that are STILL ALIVE even though their
-/// session is filed — manifest `exited`, or an `archived.json` marker present.
+/// session is filed — manifest `exited`, or a legacy `archived.json` marker.
 ///
 /// This is the leak behind the load-average blowup: a per-process host that
 /// never exited keeps running its observer / login-shell PATH-probe loop
@@ -4760,9 +4761,9 @@ pub fn reap_orphan_session_hosts() -> Vec<ReapedHost> {
         let session_id = manifest.session.id.clone();
 
         // Filed = the session is done and no host should still be running for
-        // it: an `exited` manifest, or an `archived.json` marker beside it
-        // (session_ops::ARCHIVE_MARKER; referenced by literal to avoid a
-        // session_ops -> session_host -> session_ops dependency cycle).
+        // it: an `exited` manifest, or a legacy `archived.json` marker an
+        // older Host left beside it. `migrate_archived_sessions` skips a
+        // running manifest, so the marker survives until this files it.
         let archived = session_dir(&session_id).join("archived.json").exists();
         let reason = match manifest.state {
             HostedSessionState::Exited => ReapReason::Exited,

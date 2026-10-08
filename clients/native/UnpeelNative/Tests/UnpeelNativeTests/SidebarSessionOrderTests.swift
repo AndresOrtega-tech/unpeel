@@ -72,8 +72,8 @@ final class SidebarSessionOrderTests: XCTestCase {
                         "pinned_at": 2,
                     ],
                     [
-                        "key": "session:archived", "project_id": "project",
-                        "session_id": "archived", "pinned_at": 3,
+                        "key": "session:unranked", "project_id": "project",
+                        "session_id": "unranked", "pinned_at": 3,
                     ],
                 ],
                 "other": [
@@ -97,8 +97,8 @@ final class SidebarSessionOrderTests: XCTestCase {
         let rows = grouped?["project"] ?? []
         XCTAssertEqual(
             rows.map { $0["key"] as? String },
-            ["project:ideas", "project:tui-group", "session:a", "session:archived"],
-            "ranked rows in the new order, the archived pin retained below"
+            ["project:ideas", "project:tui-group", "session:a", "session:unranked"],
+            "ranked rows in the new order, the unranked pin retained below"
         )
         XCTAssertEqual(
             rows.first { ($0["key"] as? String) == "session:a" }?["extra"] as? String,

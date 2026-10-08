@@ -1103,17 +1103,15 @@ extension SessionRowView: @MainActor Equatable {
             && lhs.isPinned == rhs.isPinned
             && lhs.canPin == rhs.canPin
             && lhs.isConfirmingRemove == rhs.isConfirmingRemove
-            && lhs.isConfirmingArchive == rhs.isConfirmingArchive
+            && lhs.isConfirmingStop == rhs.isConfirmingStop
             && lhs.isRemoving == rhs.isRemoving
             && lhs.isRestarting == rhs.isRestarting
             && lhs.isResumingAgent == rhs.isResumingAgent
-            && lhs.isArchiving == rhs.isArchiving
-            && lhs.isArchived == rhs.isArchived
             && lhs.isEditing == rhs.isEditing
             && lhs.notifyWhenDone == rhs.notifyWhenDone
             && lhs.canRestart == rhs.canRestart
             && lhs.canResumeAgent == rhs.canResumeAgent
-            && lhs.canArchive == rhs.canArchive
+            && lhs.canStop == rhs.canStop
             && lhs.canNotifyWhenDone == rhs.canNotifyWhenDone
             && lhs.canClearAttention == rhs.canClearAttention
             && lhs.paneItems == rhs.paneItems
@@ -1147,7 +1145,6 @@ extension ProjectRowView: @MainActor Equatable {
             && lhs.isConfirmingRemove == rhs.isConfirmingRemove
             && lhs.shortcutHint == rhs.shortcutHint
             && lhs.hasLiveSessions == rhs.hasLiveSessions
-            && lhs.archivedSessionCount == rhs.archivedSessionCount
             && lhs.localSiteURLs == rhs.localSiteURLs
             && lhs.isPinned == rhs.isPinned
             && lhs.canPin == rhs.canPin
@@ -1202,10 +1199,6 @@ struct ProjectNodeView: View {
     /// pinned child groups interleave in the user's order.
     private var renderedPinnedItems: [SidebarMixedItem] {
         store.renderedPinnedItems(in: node)
-    }
-
-    private var archivedSessionCount: Int {
-        store.archivedSessionCount(in: node)
     }
 
     /// Collapsed-project state rollup over this project's sessions plus
@@ -1291,7 +1284,7 @@ struct ProjectNodeView: View {
         .background {
             // Drop-target frame lives on its OWN stable layer, not on the
             // hover-animated wash above. A group whose sessions are all
-            // stopped/archived (so its body is nearly empty) would otherwise
+            // stopped (so its body is nearly empty) would otherwise
             // report a small, animation-jittery shell frame — sometimes stale
             // under the cursor — and a dragged session would fall through to
             // the parent project shell instead of filing INTO the group. This
@@ -1361,7 +1354,6 @@ struct ProjectNodeView: View {
             isConfirmingRemove: store.confirmingRemoveProjectID == node.id,
             shortcutHint: store.projectShortcutHintIndex(forProject: node.id),
             hasLiveSessions: node.sessions.contains(where: \.isLive),
-            archivedSessionCount: archivedSessionCount,
             // Host-probed live URLs are family-wide, so only the top-level
             // project row wears the globe — child groups/worktrees would
             // repeat the same links.
@@ -1392,7 +1384,6 @@ struct ProjectNodeView: View {
             onCreateGroup: { store.promptCreateGroup(projectID: node.id) },
             onRemoveGroup: { store.removeGroupProject(node.id) },
             onStopAll: { store.stopAllSessions(projectID: node.id) },
-            onOpenArchived: { store.openArchivedSessions(projectID: node.id) },
             onRevealInFinder: { store.revealInFinder(path: node.project.path) },
             onOpenIn: { target in
                 store.openWorkspace(path: node.project.path, in: target)
@@ -1570,11 +1561,11 @@ struct ProjectNodeView: View {
                 }
             }
 
-            // Empty state: archived sessions live in the main pane, so a
-            // project with only archived history still reads as empty here.
+            // Empty state: a project whose only history is stopped rows past
+            // the inactive-preview window still reads as empty here.
             if pinnedItems.isEmpty && mixedItems.isEmpty {
                 EmptySessionsPlaceholderRow(
-                    label: archivedSessionCount == 0 ? "No sessions yet." : "No active sessions.",
+                    label: node.sessions.isEmpty ? "No sessions yet." : "No active sessions.",
                     depth: depth,
                     indentBase: 28,
                     menuPresets: store.displayAvailablePresets,
@@ -1587,20 +1578,17 @@ struct ProjectNodeView: View {
                     },
                     onManagePresets: { store.openSettings(tab: .agents) },
                     onManagePlugins: { store.openSettings(tab: .plugins) },
-                    showsManagePresets: store.selectedHostScope == .local,
-                    archivedCount: archivedSessionCount,
-                    onOpenArchived: { store.openArchivedSessions(projectID: node.id) }
+                    showsManagePresets: store.selectedHostScope == .local
                 )
             }
 
             // Everything past the inactive-preview window leaves the sidebar.
-            // Hidden natural stops remain available through search/history;
-            // hidden archives also live in the project context menu's
-            // "Archived (N)" library — no sidebar footer row.
+            // Hidden stopped rows remain available through search/history —
+            // no sidebar footer row.
         }
-        // Rows keep stable ids across the active → archive move, so a
-        // just-archived session glides into the fixed bottom section instead
-        // of teleporting. Suppressed from lift until one tick AFTER a drag
+        // Rows keep stable ids across the live → stopped move, so a
+        // just-stopped session glides into the stopped section instead of
+        // teleporting. Suppressed from lift until one tick AFTER a drag
         // lands (`listGlideSuppressed`): the drop applies its reorder in an
         // animation-disabled transaction (rows are already visually in
         // place via the transform gap), but a value-keyed animation
@@ -1629,7 +1617,6 @@ struct ProjectNodeView: View {
         // A date-sorted group has no manual order to write, so re-ordering
         // is off entirely.
         let isReorderable = !store.isDateSorted(projectID: node.id)
-        let isArchived = store.sessionIsRecentArchived(session.id)
         // Detached-drag participation is broader than reordering: a LOCAL
         // session in a date-sorted group must still lift, so it can be
         // dragged OUT of the group (a committed within-list reorder flips
@@ -1644,9 +1631,8 @@ struct ProjectNodeView: View {
         // until the project list rebuilds. The controller refuses to arm a
         // press while those modes own the pointer (text selection / confirm
         // buttons).
-        let isDraggable = !isArchived && (
-            isReorderable || store.canLiftSessionFromDateSortedList(session.id)
-        )
+        let isDraggable = isReorderable
+            || store.canLiftSessionFromDateSortedList(session.id)
         // Native-only within-project drag reorder (the Svelte app has no
         // within-project reorder). Session rows use the manual detached drag
         // (SidebarSessionDrag.swift): mouse-down anywhere on the row plus
@@ -1664,26 +1650,19 @@ struct ProjectNodeView: View {
             selectionState: store.sessionSelection.rowState(for: session.id),
             shortcutHint: shortcutHint,
             isUnread: store.sessionIsUnread(session.id),
-            isPinned: !isArchived
-                && store.isPinned(sessionID: session.id, projectID: node.id),
+            isPinned: store.isPinned(sessionID: session.id, projectID: node.id),
             canPin: store.sessionCanPin(session.id),
-            // Archive-page confirms render (and monitor click-away) on the
-            // archive page only — a mirrored sidebar confirm would cancel
-            // them on the mouse-down aimed at the archive card's buttons.
-            isConfirmingRemove: store.confirmingRemoveSessionID == session.id
-                && store.confirmingRemoveSurface == .sidebar,
-            isConfirmingArchive: store.confirmingArchiveSessionID == session.id,
+            isConfirmingRemove: store.confirmingRemoveSessionID == session.id,
+            isConfirmingStop: store.confirmingStopSessionID == session.id,
             isRemoving: store.removingSessionIDs.contains(session.id),
             isRestarting: store.restartingSessionIDs.contains(session.id),
             isResumingAgent: store.resumingAgentSessionIDs.contains(session.id),
-            isArchiving: store.archivingSessionIDs.contains(session.id),
-            isArchived: isArchived,
             isEditing: store.editingSessionID == session.id
                 && store.editingSessionSurface == .sidebar,
             notifyWhenDone: store.notifyWhenDoneSessionIDs.contains(session.id),
             canRestart: store.sessionCanRestart(session.id),
             canResumeAgent: store.sessionCanResumeAgent(session.id),
-            canArchive: store.sessionCanArchive(session.id),
+            canStop: store.sessionCanStop(session.id),
             canNotifyWhenDone: store.sessionCanNotifyWhenDone(session.id),
             canClearAttention: store.sessionCanClearAttention(session.id),
             paneItems: store.paneSidebarItems(
@@ -1721,16 +1700,9 @@ struct ProjectNodeView: View {
             onRequestRemove: { store.requestRemoveSession(session.id) },
             onConfirmRemove: { store.confirmRemoveSession(session.id) },
             onCancelRemove: { store.cancelRemoveConfirm() },
-            onArchive: { store.requestArchiveSession(session.id) },
-            onUnarchive: {
-                if store.sessionCanRestart(session.id) {
-                    store.resumeArchivedSession(session.id)
-                } else {
-                    store.unarchiveSession(session.id)
-                }
-            },
-            onConfirmArchive: { store.archiveSession(session.id) },
-            onCancelArchive: { store.cancelArchiveConfirm() },
+            onStop: { store.requestStopSession(session.id) },
+            onConfirmStop: { store.confirmStopSession(session.id) },
+            onCancelStop: { store.cancelStopConfirm() },
             onCopyTranscript: {
                 store.copyTranscriptMarkdown($0, entries: $1)
             },
@@ -1802,7 +1774,7 @@ struct ProjectNodeView: View {
         } else {
             // Non-reorderable rows still report their geometry to the shared
             // mouse-down monitor so selection has the same immediate feel in
-            // date-sorted/remote/archive lists.
+            // date-sorted/remote lists.
             row.sidebarDragRowFrame(
                 id: session.id,
                 kind: .session(
@@ -1827,8 +1799,6 @@ struct EmptySessionsPlaceholderRow: View {
     var onManagePresets: () -> Void = {}
     var onManagePlugins: (() -> Void)? = nil
     var showsManagePresets = true
-    var archivedCount = 0
-    var onOpenArchived: (() -> Void)?
 
     @State private var hovering = false
 
@@ -1840,9 +1810,7 @@ struct EmptySessionsPlaceholderRow: View {
                     onLaunch: onLaunch,
                     onManagePresets: onManagePresets,
                     onManagePlugins: onManagePlugins,
-                    showsManagePresets: showsManagePresets,
-                    archivedCount: archivedCount,
-                    onOpenArchived: onOpenArchived
+                    showsManagePresets: showsManagePresets
                 )
             } label: {
                 Text(label)
@@ -1947,10 +1915,6 @@ struct ProjectRowView: View {
     /// Any live session in THIS project (not worktree children) — gates
     /// "Stop all" (hasLive, ProjectItem.svelte:896).
     var hasLiveSessions = false
-    /// Archived sessions owned by this exact project. Recent ones can remain
-    /// in the inactive preview; a non-zero count adds the complete main-pane
-    /// archive library to the project context menu.
-    var archivedSessionCount = 0
     /// Live local-site URLs served by this project's family (host-probed).
     /// Non-empty shows the globe link button beside the name and the Links
     /// section of the context menu. Top-level local projects only.
@@ -1970,7 +1934,6 @@ struct ProjectRowView: View {
     /// fall back to the parent on the next scan.
     var onRemoveGroup: () -> Void = {}
     var onStopAll: () -> Void = {}
-    var onOpenArchived: () -> Void = {}
     var onRevealInFinder: () -> Void = {}
     /// Open the project's path in an external app (context-menu "Open in").
     var onOpenIn: (WorkspaceOpenTarget) -> Void = { _ in }
@@ -2050,8 +2013,9 @@ struct ProjectRowView: View {
     /// the inline confirm stays.
     /// Removing a project also removes every session in its subtree
     /// (UnpeelStore.removeProject), so the confirm names the count.
-    /// `node.sessions` already includes archived rows — they are hidden at
-    /// display time, not at tree build — so no separate archived term.
+    /// `node.sessions` already includes stopped rows hidden past the
+    /// inactive-preview window — they are hidden at display time, not at
+    /// tree build.
     private var removeSessionCount: Int {
         func count(_ n: ProjectNode) -> Int {
             n.sessions.count + n.worktrees.map(count).reduce(0, +)
@@ -2187,9 +2151,7 @@ struct ProjectRowView: View {
                     onLaunch: onLaunchPreset,
                     onManagePresets: onManagePresets,
                     onManagePlugins: onManagePlugins,
-                    showsManagePresets: true,
-                    archivedCount: archivedSessionCount,
-                    onOpenArchived: onOpenArchived
+                    showsManagePresets: true
                 )
                 // The pill overflows the row's trailing inset a little so its
                 // "+" sits on the same edge as the session rows' hover
@@ -2216,7 +2178,7 @@ struct ProjectRowView: View {
         .help("Drag anywhere on the row to reorder")
         // Project context menu (openProjectMenu, ProjectItem.svelte:818-941).
         // Order: New session · [Folder color] · [Sort] · [New worktree…] ·
-        // [New group…] · [Move to ▸ Workspace] · [Stop all] · [Archived] ·
+        // [New group…] · [Move to ▸ Workspace] · [Stop all] ·
         // ── · Reveal in Finder · Open in <Editor> · ── · Remove. Stop all
         // is non-destructive (stopSession per live session — rows stay as
         // exited). Unpeel Sessions MCP access is set per session.
@@ -2334,11 +2296,6 @@ struct ProjectRowView: View {
                     onStopAll()
                 }
             }
-            if archivedSessionCount > 0 {
-                Button("Archived (\(archivedSessionCount))") {
-                    onOpenArchived()
-                }
-            }
             // Local sites this project's sessions are serving (the old
             // titlebar globe dropdown, relocated here).
             if !localSiteURLs.isEmpty {
@@ -2402,7 +2359,7 @@ struct ProjectRowView: View {
                             onRemoveWorktree()
                         }
                     } else {
-                        // Groups archive their sessions under the parent before
+                        // Groups re-file their sessions under the parent before
                         // the organizational record is removed.
                         Button("Remove group", role: .destructive) {
                             onRemoveGroup()
@@ -2520,8 +2477,6 @@ struct QuickPresetStrip: View {
     var onManagePresets: () -> Void = {}
     var onManagePlugins: (() -> Void)? = nil
     var showsManagePresets = true
-    var archivedCount = 0
-    var onOpenArchived: (() -> Void)?
 
     @State private var hovering = false
     @State private var plusHovering = false
@@ -2573,9 +2528,7 @@ struct QuickPresetStrip: View {
                 onLaunch: onLaunch,
                 onManagePresets: onManagePresets,
                 onManagePlugins: onManagePlugins,
-                showsManagePresets: showsManagePresets,
-                archivedCount: archivedCount,
-                onOpenArchived: onOpenArchived
+                showsManagePresets: showsManagePresets
             )
         } label: {
             // plusIcon (icons.ts:21) at 16px, centered in the same 22×22
@@ -2653,9 +2606,6 @@ struct PresetMenuButton: View {
 /// available preset, then "Manage presets…". Used by the sidebar project "+"
 /// (`QuickPresetStrip.newSessionMenu`), the empty-state placeholder, and the
 /// collapsed-sidebar title-bar "+" so all three offer the same presets.
-/// `archivedCount`/`onOpenArchived` (project-scoped "+"s only) add an
-/// "Archived (N)" entry after the presets that opens the project's archive
-/// library in the main pane — same destination as the context-menu item.
 @MainActor
 @ViewBuilder
 func newSessionMenuContent(
@@ -2663,9 +2613,7 @@ func newSessionMenuContent(
     onLaunch: @escaping (Preset) -> Void,
     onManagePresets: @escaping () -> Void,
     onManagePlugins: (() -> Void)? = nil,
-    showsManagePresets: Bool = true,
-    archivedCount: Int = 0,
-    onOpenArchived: (() -> Void)? = nil
+    showsManagePresets: Bool = true
 ) -> some View {
     let split = splitPresetsForNewSessionMenu(menuPresets)
     PresetMenuButton(preset: .newTerminal) {
@@ -2704,18 +2652,6 @@ func newSessionMenuContent(
                 } label: {
                     Text("Manage Plugins…")
                 }
-            }
-        }
-    }
-    if archivedCount > 0, let onOpenArchived {
-        Divider()
-        Button {
-            onOpenArchived()
-        } label: {
-            Label {
-                Text("Archived (\(archivedCount))")
-            } icon: {
-                Image(systemName: "archivebox")
             }
         }
     }
@@ -2783,35 +2719,27 @@ private struct QuickPresetMenuChip: View {
 // MARK: - Session row
 
 /// Exact resume affordance rendered by a sidebar row. Keeping this decision
-/// pure makes the active-runtime, returned-shell, and archived states
+/// pure makes the active-runtime, returned-shell, and stopped states
 /// testable without reaching through SwiftUI's private view tree.
 enum SessionRowResumePresentation: Equatable {
     case none
     case resumeAgent
     case resumeSession
-    case restore
-    case restoreAndResume
 
     var title: String? {
         switch self {
         case .none: return nil
         case .resumeAgent: return "Resume Agent"
         case .resumeSession: return "Resume"
-        case .restore: return "Restore from archive"
-        case .restoreAndResume: return "Restore & Resume"
         }
     }
 }
 
 func sessionRowResumePresentation(
     session: SessionEntry,
-    isArchived: Bool,
     canRestart: Bool,
     canResumeAgent: Bool
 ) -> SessionRowResumePresentation {
-    if isArchived {
-        return canRestart ? .restoreAndResume : .restore
-    }
     guard session.status != .starting else { return .none }
     if session.isLive {
         return canResumeAgent ? .resumeAgent : .none
@@ -2820,9 +2748,7 @@ func sessionRowResumePresentation(
 }
 
 func sessionRowShowsInlineResume(_ presentation: SessionRowResumePresentation) -> Bool {
-    presentation == .resumeAgent
-        || presentation == .resumeSession
-        || presentation == .restoreAndResume
+    presentation == .resumeAgent || presentation == .resumeSession
 }
 
 /// The representative is only the sidebar anchor for a pane group. Preserve
@@ -2941,12 +2867,11 @@ struct SessionRowView: View {
     var isPinned = false
     var canPin = true
     /// Inline remove confirmation: the whole row swaps to
-    /// "Remove session?" + Remove/Cancel (the Svelte app swaps only the
-    /// hover archive button to a "Confirm" pill, ProjectItem.svelte:1562).
+    /// "Remove session?" + Remove/Cancel.
     var isConfirmingRemove = false
-    /// Inline archive confirmation, shown only for actively-working sessions
-    /// (archiving stops the agent mid-turn); settled rows archive directly.
-    var isConfirmingArchive = false
+    /// Inline stop confirmation, shown only for actively-working sessions
+    /// (stopping kills the agent mid-turn); settled rows stop directly.
+    var isConfirmingStop = false
     /// Kill/cleanup in flight: row disabled, meta shows "removing".
     var isRemoving = false
     /// Restart in flight: row disabled, meta shows "restarting"
@@ -2954,13 +2879,6 @@ struct SessionRowView: View {
     var isRestarting = false
     /// In-place provider resume; the terminal remains mounted.
     var isResumingAgent = false
-    /// Archive in flight (live host still stopping): row muted + disabled,
-    /// leading slot shows a muted spinner, meta shows "archiving". The row
-    /// disappears into the archive once the stop completes.
-    var isArchiving = false
-    /// Already archived (a recent archive still showing in the stopped
-    /// group): the archive affordances swap to Restore.
-    var isArchived = false
     /// Inline rename editor (double-click on the label or context-menu
     /// Rename — `editingSessionId` in ProjectItem.svelte:146): the label
     /// swaps to a TextField pre-filled with the current title. Enter
@@ -2977,8 +2895,10 @@ struct SessionRowView: View {
     var canRestart = true
     /// Whether an ended managed launch can resume inside this same terminal.
     var canResumeAgent = false
-    /// Whether Stop and archive / Archive preserves a resumable launch.
-    var canArchive = true
+    /// Whether Stop applies: a live launch with a resumable conversation,
+    /// so the stopped row it leaves can Resume. Otherwise the clear-it-out
+    /// affordance is Remove.
+    var canStop = true
     /// Whether this session's provider reports turn completion through hooks,
     /// making the "Notify when done" push reliable. Gates that toggle.
     var canNotifyWhenDone = true
@@ -3011,16 +2931,13 @@ struct SessionRowView: View {
     var onRequestRemove: () -> Void = {}
     var onConfirmRemove: () -> Void = {}
     var onCancelRemove: () -> Void = {}
-    /// Archive this session (stop it if running, keep everything on disk,
-    /// move the row into the bottom archive section/library). Busy sessions
-    /// confirm inline.
-    var onArchive: () -> Void = {}
-    /// Restore a recent archived row, resuming when its launch supports it.
-    var onUnarchive: () -> Void = {}
-    /// Confirmed archive from the inline row — skips the busy re-check that
-    /// `onArchive` routes through (it would just re-arm the confirm).
-    var onConfirmArchive: () -> Void = {}
-    var onCancelArchive: () -> Void = {}
+    /// Stop this session: the terminal stops and the row stays in the
+    /// stopped section, ready to Resume. Busy sessions confirm inline.
+    var onStop: () -> Void = {}
+    /// Confirmed stop from the inline row — skips the busy re-check that
+    /// `onStop` routes through (it would just re-arm the confirm).
+    var onConfirmStop: () -> Void = {}
+    var onCancelStop: () -> Void = {}
     /// Copy this session's conversation transcript as Markdown (rendered by the
     /// host using the shared Settings ▸ Transcripts content toggles). The Int
     /// is the flyout's range pick: entry count, or 0 for the whole conversation.
@@ -3054,8 +2971,8 @@ struct SessionRowView: View {
     var body: some View {
         if isConfirmingRemove {
             confirmRemoveRow
-        } else if isConfirmingArchive {
-            confirmArchiveRow
+        } else if isConfirmingStop {
+            confirmStopRow
         } else {
             normalRow
         }
@@ -3098,62 +3015,51 @@ struct SessionRowView: View {
 
             Spacer(minLength: 4)
 
-            // Trailing cluster: restart/archive and the stable meta slot.
+            // Trailing cluster: resume/stop and the stable meta slot.
             HStack(spacing: 4) {
                 // The cluster is trailing-aligned, so hover actions grow
                 // leftward without moving the age or runtime mark.
                 if isHovering, showsInlineResume, !isRemoving,
-                   !isRestarting, !isResumingAgent, !isArchiving {
+                   !isRestarting, !isResumingAgent {
                     RestartActionButton(help: inlineResumeHelp, action: onResume)
                         .padding(.trailing, -2)
                 }
 
-                if isRemoving || isRestarting || isResumingAgent || isArchiving {
+                if isRemoving || isRestarting || isResumingAgent {
                     Text(
                         isRemoving
                             ? "removing"
-                            : isArchiving
-                                ? "archiving"
-                                : isResumingAgent
-                                    ? "resuming agent"
-                                    : (session.isLive ? "reloading" : "resuming")
+                            : isResumingAgent
+                                ? "resuming agent"
+                                : (session.isLive ? "reloading" : "resuming")
                     )
                     .font(.system(size: 9))
                     .opacity(0.7)
                 } else {
-                    // Fixed-width meta slot so the hover swap (age → archive)
+                    // Fixed-width meta slot so the hover swap (age → stop/X)
                     // never changes the cluster width; only the trailing
                     // content cross-fades in place.
                     ZStack(alignment: .trailing) {
-                        if isHovering, !isArchived {
+                        if isHovering {
                             // Hover swap: the age hides and the action
                             // affordances appear. Overflowing the slot via the
                             // negative padding nudges the 13px glyphs to the
                             // row's trailing edge without reflowing the row.
-                            // Non-resumable commands can't meaningfully be
-                            // archived (nothing to resume later), so their
-                            // clear-it-out affordance is Remove.
-                            if canArchive {
-                                ArchiveActionButton(
-                                    help: session.isLive ? "Stop and archive" : "Archive",
-                                    action: onArchive
-                                )
-                                .padding(.trailing, -4)
+                            // A live resumable launch stops (its row stays,
+                            // ready to Resume); everything else — live
+                            // launches with nothing to resume, and every
+                            // stopped row — clears out with Remove.
+                            if canStop {
+                                StopActionButton(action: onStop)
+                                    .padding(.trailing, -4)
                             } else {
                                 // The row-level X is deliberately immediate:
-                                // this launch has nothing resumable to save,
-                                // so kill/delete it instead of routing through
-                                // Archive. Context-menu Remove still confirms.
+                                // a one-click cleanup (Resume, when the row
+                                // has one, sits to the left). Context-menu
+                                // Remove still confirms.
                                 RemoveActionButton(action: onConfirmRemove)
                                     .padding(.trailing, -4)
                             }
-                        } else if isHovering, isArchived {
-                            // Every archived row keeps an immediate X: the
-                            // conversation is already filed away, so deleting
-                            // it is a one-click cleanup (Resume, when the
-                            // archive is resumable, sits to the left).
-                            RemoveActionButton(action: onConfirmRemove)
-                                .padding(.trailing, -4)
                         } else if let shortcutHint {
                             // Held ⌘ swaps the age for the ⌘N hint
                             // (ProjectItem.svelte:1536-1540, 9px/500 @ 0.7).
@@ -3182,13 +3088,13 @@ struct SessionRowView: View {
         // interpolated it as a fade and made the double-click rename blink.
         .animation(nil, value: isEditing)
         .foregroundStyle(
-            session.isLive && !isArchiving ? Theme.foreground : Theme.mutedForeground
+            session.isLive ? Theme.foreground : Theme.mutedForeground
         )
         // Exited rows read as clearly stopped: a hard dim, not the barely
         // visible 0.82 wash they used to get. Hover lifts the dim so the
-        // Restart/Archive affordances (and the label) stay readable.
+        // Resume/Remove affordances (and the label) stay readable.
         .opacity(
-            (isRemoving || isRestarting || isResumingAgent || isArchiving)
+            (isRemoving || isRestarting || isResumingAgent)
                 ? 0.5
                 : (session.isLive ? 1 : (isHovering ? 0.9 : 0.55))
         )
@@ -3224,7 +3130,7 @@ struct SessionRowView: View {
         .contextMenu {
             regularContextMenuItems
         }
-        .allowsHitTesting(!isRemoving && !isRestarting && !isResumingAgent && !isArchiving)
+        .allowsHitTesting(!isRemoving && !isRestarting && !isResumingAgent)
     }
 
     @ViewBuilder
@@ -3275,9 +3181,6 @@ struct SessionRowView: View {
         // the same answers the phone's session sheet gets): no Resume for
         // commands whose conversation a relaunch would silently lose and no
         // notify toggle without hook Stop events.
-        // (There is no separate "Stop" verb: "Stop and archive" below is
-        // the stop — it kills the hosted terminal and files the row into the
-        // bottom archive section, from where Resume continues the conversation.)
         if session.status != .starting {
             // An ended managed launch can resume from the still-live shell in
             // the existing terminal. A stopped Session uses the legacy
@@ -3315,21 +3218,14 @@ struct SessionRowView: View {
             copyToPasteboard("Unpeel Session ID: \(session.id)")
         }
         Divider()
-        // Archive is the non-destructive "file it away" — and for live
-        // sessions it is also the stop verb: kill the hosted terminal, keep
-        // the whole session on disk, move the row into the archive section.
-        // Working sessions get an inline confirm first. Already-archived
-        // resumable rows offer the combined Restore & Resume action; legacy
-        // non-resumable archives can still be plainly restored.
-        if isArchived {
-            Button(resumePresentation.title ?? "Restore from archive") {
-                onUnarchive()
-            }
-        } else if canArchive {
-            // Only resumable commands offer Archive; for the rest, Remove
-            // below is the sole clear-it-out verb.
-            Button(session.isLive ? "Stop and archive" : "Archive") {
-                onArchive()
+        // Stop is the non-destructive "clear it out": kill the hosted
+        // terminal and keep the row in the stopped section, from where
+        // Resume continues the conversation. Working sessions get an inline
+        // confirm first. Only live resumable launches offer it; for the
+        // rest, Remove below is the sole clear-it-out verb.
+        if canStop {
+            Button("Stop") {
+                onStop()
             }
         }
         // Remove stays the explicit destructive verb: it deletes Unpeel's
@@ -3387,20 +3283,20 @@ struct SessionRowView: View {
         .background(RemoveConfirmDismissMonitor(onCancel: onCancelRemove))
     }
 
-    /// Archive confirmation — only reached for actively-working sessions
-    /// (archiving stops the agent mid-turn; settled rows archive without
+    /// Stop confirmation — only reached for actively-working sessions
+    /// (stopping kills the agent mid-turn; settled rows stop without
     /// asking). Same inline pattern as the remove confirm.
-    private var confirmArchiveRow: some View {
+    private var confirmStopRow: some View {
         HStack(spacing: 7) {
-            Text("Stop and archive session?")
+            Text("Stop?")
                 .font(Theme.rowLabelFont)
                 .foregroundStyle(Theme.foreground)
                 .lineLimit(1)
 
             Spacer(minLength: 4)
 
-            ConfirmPillButton(label: "Cancel", destructive: false, action: onCancelArchive)
-            ConfirmPillButton(label: "Archive", destructive: true, action: onConfirmArchive)
+            ConfirmPillButton(label: "Cancel", destructive: false, action: onCancelStop)
+            ConfirmPillButton(label: "Stop", destructive: true, action: onConfirmStop)
         }
         .padding(EdgeInsets(top: 2, leading: indentBase + CGFloat(depth) * 14, bottom: 2, trailing: 5))
         .frame(minHeight: Theme.sessionRowHeight)
@@ -3409,7 +3305,7 @@ struct SessionRowView: View {
                 .fill(Theme.hoverRow)
         )
         .contentShape(Rectangle())
-        .background(RemoveConfirmDismissMonitor(onCancel: onCancelArchive))
+        .background(RemoveConfirmDismissMonitor(onCancel: onCancelStop))
     }
 
     /// Fixed leading icon slot (ProjectItem.svelte .session-leading,
@@ -3430,11 +3326,7 @@ struct SessionRowView: View {
             // otherwise attention shows the 6px #f59e0b dot. Dragging never
             // replaces status with a grip, so the leading signal stays stable
             // while mousing over the row.
-            if isArchiving {
-                // Stopping on the way into the archive: a muted spinner, not
-                // the tool-tinted busy one — the session is winding down.
-                BrailleSpinner(color: Theme.mutedForeground)
-            } else if let spinnerCommand {
+            if let spinnerCommand {
                 BrailleSpinner(color: Theme.toolSpinnerColor(forCommand: spinnerCommand))
             } else if session.status == .attention {
                 AttentionDot(color: Theme.attention)
@@ -3457,8 +3349,8 @@ struct SessionRowView: View {
     }
 
     /// Every actually resumable state gets an inline hover action: a managed
-    /// agent that returned to its live shell, a stopped Session, or a
-    /// resumable archive. Archive/Remove eligibility is independent.
+    /// agent that returned to its live shell, or a stopped Session.
+    /// Stop/Remove eligibility is independent.
     private var showsInlineResume: Bool {
         sessionRowShowsInlineResume(resumePresentation)
     }
@@ -3466,7 +3358,6 @@ struct SessionRowView: View {
     private var inlineResumeHelp: String {
         switch resumePresentation {
         case .resumeAgent: return "Resume agent in this terminal"
-        case .restoreAndResume: return "Restore and resume session"
         default: return "Resume session (continues the conversation)"
         }
     }
@@ -3474,7 +3365,6 @@ struct SessionRowView: View {
     private var resumePresentation: SessionRowResumePresentation {
         sessionRowResumePresentation(
             session: session,
-            isArchived: isArchived,
             canRestart: canRestart,
             canResumeAgent: canResumeAgent
         )
@@ -3515,18 +3405,17 @@ struct AttentionDot: View {
 
 // MARK: - Remove session (inline confirm) building blocks
 
-/// 22×22 radius-6 archive button shown in the meta slot on row hover
-/// (.session-archive-action, ProjectItem.svelte:2700-2741): 13px archive
-/// glyph, muted → foreground + fg-10% bg on hover.
-private struct ArchiveActionButton: View {
-    var help = "Archive session"
+/// 22×22 radius-6 stop button shown in the meta slot on row hover: 13px
+/// stop glyph, muted → foreground + fg-10% bg on hover.
+private struct StopActionButton: View {
+    var help = "Stop session"
     let action: () -> Void
 
     @State private var hovering = false
 
-    /// archiveIcon (icons.ts:32), same SVG→template pipeline as ChromeIcons.
-    @MainActor private static let archiveImage: NSImage? = {
-        let svg = ##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="#FFFFFF" viewBox="0 0 256 256"><path d="M224,50H32A14,14,0,0,0,18,64V88a14,14,0,0,0,14,14h2v90a14,14,0,0,0,14,14H208a14,14,0,0,0,14-14V102h2a14,14,0,0,0,14-14V64A14,14,0,0,0,224,50ZM210,192a2,2,0,0,1-2,2H48a2,2,0,0,1-2-2V102H210ZM226,88a2,2,0,0,1-2,2H32a2,2,0,0,1-2-2V64a2,2,0,0,1,2-2H224a2,2,0,0,1,2,2ZM98,136a6,6,0,0,1,6-6h48a6,6,0,0,1,0,12H104A6,6,0,0,1,98,136Z"></path></svg>"##
+    /// Phosphor-light stop square, same SVG→template pipeline as ChromeIcons.
+    @MainActor private static let stopImage: NSImage? = {
+        let svg = ##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="#FFFFFF" viewBox="0 0 256 256"><path fill-rule="evenodd" d="M56,42H200A14,14,0,0,1,214,56V200A14,14,0,0,1,200,214H56A14,14,0,0,1,42,200V56A14,14,0,0,1,56,42ZM56,54A2,2,0,0,0,54,56V200A2,2,0,0,0,56,202H200A2,2,0,0,0,202,200V56A2,2,0,0,0,200,54Z"></path></svg>"##
         let image = NSImage(data: Data(svg.utf8))
         image?.isTemplate = true
         return image
@@ -3537,14 +3426,14 @@ private struct ArchiveActionButton: View {
             action()
         } label: {
             Group {
-                if let image = Self.archiveImage {
+                if let image = Self.stopImage {
                     Image(nsImage: image)
                         .resizable()
                         .interpolation(.high)
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 13, height: 13)
                 } else {
-                    Image(systemName: "archivebox")
+                    Image(systemName: "stop")
                         .font(.system(size: 11, weight: .medium))
                 }
             }
@@ -3561,8 +3450,8 @@ private struct ArchiveActionButton: View {
     }
 }
 
-/// The ArchiveActionButton's destructive sibling, shown on rows whose
-/// command can't resume (nothing to archive FOR): same 22×22 hover
+/// The StopActionButton's destructive sibling, shown on rows with nothing
+/// to stop and keep (non-resumable launches and stopped rows): same 22×22 hover
 /// treatment and X glyph. The row-level X is the explicit immediate
 /// kill/delete affordance; the context-menu Remove verb still confirms.
 private struct RemoveActionButton: View {
@@ -3591,7 +3480,7 @@ private struct RemoveActionButton: View {
 
 /// 22×22 radius-6 restart button shown when an exited row is hovered: 13px
 /// Phosphor "arrow-clockwise" glyph, muted →
-/// foreground + fg-10% bg on hover (same treatment as ArchiveActionButton).
+/// foreground + fg-10% bg on hover (same treatment as StopActionButton).
 private struct RestartActionButton: View {
     var help = "Resume session (continues the conversation)"
     let action: () -> Void
@@ -3963,8 +3852,7 @@ private extension View {
     }
 }
 
-/// Small pill button for the inline confirm row. Destructive styling
-/// follows .session-archive-action.confirming (ProjectItem.svelte:2745-2756):
+/// Small pill button for the inline confirm row. Destructive styling:
 /// danger text on danger-15% (25% hovered); Cancel is muted on fg-10%.
 private struct ConfirmPillButton: View {
     let label: String

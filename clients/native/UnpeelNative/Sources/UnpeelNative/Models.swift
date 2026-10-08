@@ -450,12 +450,13 @@ struct AppStateFile: Decodable {
     /// project/group/worktree id → "date" (recently updated first). Absent
     /// id ⇒ custom (the manual drag order). Absent ⇒ empty.
     let sessionSortModes: [String: String]
-    /// `auto_stop_archive_minutes` (state.rs) — stop-and-archive sessions
-    /// continuously idle this long. Shared with the TUI. nil = key absent
-    /// (⇒ the opt-out default applies); explicit 0 = off.
-    let autoStopArchiveMinutes: Int?
+    /// `auto_stop_archive_minutes` (state.rs; the key keeps its legacy name)
+    /// — auto-stop terminals continuously inactive this long. Shared with
+    /// the TUI. nil = key absent (⇒ the opt-out default applies); explicit
+    /// 0 = off.
+    let autoStopMinutes: Int?
     /// `sidebar_stopped_limit` (state.rs) — compatibility key for how many
-    /// naturally stopped and archived rows combined each sidebar group
+    /// stopped rows each sidebar group
     /// previews. Shared with the TUI. nil = key absent (⇒ the default of five
     /// applies); explicit 0 = no inactive preview.
     let sidebarStoppedLimit: Int?
@@ -496,7 +497,7 @@ struct AppStateFile: Decodable {
         case mcpAutoAddBrowserScreenshots = "mcp_auto_add_browser_screenshots"
         case nativePresetOverlayMigrated = "native_preset_overlay_migrated"
         case sessionSortModes = "session_sort_modes"
-        case autoStopArchiveMinutes = "auto_stop_archive_minutes"
+        case autoStopMinutes = "auto_stop_archive_minutes"
         case sidebarStoppedLimit = "sidebar_stopped_limit"
         case sessionTitleMode = "session_title_mode"
         case profileDisplayName = "profile_display_name"
@@ -581,8 +582,8 @@ struct AppStateFile: Decodable {
         sessionSortModes = ((try? container.decodeIfPresent(
             [String: String].self, forKey: .sessionSortModes
         )) ?? nil) ?? [:]
-        autoStopArchiveMinutes = (try? container.decodeIfPresent(
-            Int.self, forKey: .autoStopArchiveMinutes
+        autoStopMinutes = (try? container.decodeIfPresent(
+            Int.self, forKey: .autoStopMinutes
         )) ?? nil
         sidebarStoppedLimit = (try? container.decodeIfPresent(
             Int.self, forKey: .sidebarStoppedLimit
@@ -1143,7 +1144,7 @@ struct SessionEntry: Codable, Identifiable, Hashable, Sendable {
     var providerTranscriptPath: String? = nil
     /// Host-owned proof that this exact managed launch produced a provider
     /// conversation (or provider-owned per-Session storage). Runtime support
-    /// alone is deliberately insufficient for Archive/Resume.
+    /// alone is deliberately insufficient for Stop/Resume.
     var hasResumableState: Bool = false
     /// `project-override.json` marker: the user filed this session under a
     /// plain organizational group. Display + ordering only — the manifest's

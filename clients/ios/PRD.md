@@ -55,7 +55,7 @@ iOS should reuse these primitives through a new bridge layer:
 - Send key commands for terminal interaction, including Enter, Esc, Tab, arrows, and Ctrl-C.
 - Create new sessions in an existing Mac project or worktree using Mac presets.
 - Optionally send an initial prompt immediately after session creation.
-- Rename, pin, archive/remove, and restart sessions where the Mac app supports those actions.
+- Rename, pin, stop/remove, and restart sessions where the Mac app supports those actions.
 - Create, rename, reorder, and color project folders.
 - Move projects into/out of folders.
 - Respect existing blocked-project and remote-control security policy.
@@ -208,7 +208,7 @@ Session screen:
 - Title bar: session title, project/worktree, activity, connection state.
 - Terminal viewport: scrollable rendered screen and optional tail.
 - Composer: text input, send, key strip, paste mode.
-- More menu: rename, pin/unpin, restart, close, archive/remove, copy session id.
+- More menu: rename, pin/unpin, restart, close, stop/remove, copy session id.
 
 New session flow:
 
@@ -419,7 +419,7 @@ Actions:
 
 - Rename session.
 - Pin/unpin.
-- Archive/remove from visible list if supported.
+- Stop (row stays and offers Resume) or remove from the list.
 - Restart session.
 - Close/kill session.
 

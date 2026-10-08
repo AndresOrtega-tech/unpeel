@@ -114,7 +114,7 @@ and remount Host-backed Sessions there. Never clone live terminal `NSView`s.
 menu, 2026-08-18): when this Mac has two or more local workspaces, a
 top-level project's right-click menu offers **Move to ▸ Workspace ▸
 \<name\>**. The project record (plus its groups and worktree children)
-and every session filed under that subtree — archived ones included —
+and every session filed under that subtree — stopped ones included —
 move from the source home's `app-state.json` / `app-sessions/` /
 `session-order.json` / `project-order.json` into the destination home.
 Live hosts keep running: the session dir is renamed on the same volume,

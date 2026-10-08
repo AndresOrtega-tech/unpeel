@@ -131,17 +131,9 @@ impl HostBootstrapContext {
 }
 
 /// Adapter-resolved data needed by transport-neutral Host routes.
-///
-/// Bootstrap and archive data deliberately remain separate: bootstrap's
-/// shipped snapshot is merged into its public response, while the archive map
-/// can contain every filed Session and must only cross the wire for an
-/// authenticated `/mobile/archive` request. A present project key with an
-/// empty list means "known project, nothing archived"; an absent key means an
-/// unknown project.
 #[derive(Debug, Clone, Default)]
 pub struct HostRouteContext {
     pub bootstrap: Option<HostBootstrapContext>,
-    pub archived_sessions_by_project: HashMap<String, Vec<Value>>,
 }
 
 /// Host-owned project data exposed to the shared create resolver. Controllers
@@ -235,9 +227,7 @@ impl HostCreateContext {
     }
 }
 
-/// Session lifecycle verbs exposed by the shipped Controller protocol. Archive
-/// and restore remain fields of `/mobile/session-organization`; adding them
-/// here would silently create a second wire dialect.
+/// Session lifecycle verbs exposed by the shipped Controller protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerSessionAction {
     Stop,
@@ -739,7 +729,6 @@ pub fn execute_headless_session_create(
         "worktreePath": session.worktree_path,
         "worktreeBranch": session.worktree_branch,
         "notifyWhenDone": false,
-        "archived": false,
     });
     session_ops::spawn_session(
         session,
@@ -1406,7 +1395,7 @@ pub fn route(
     request: &ControllerRequest,
     bootstrap: Option<&HostBootstrapContext>,
 ) -> Option<ControllerResponse> {
-    route_with_parts(request, bootstrap, None, None, None)
+    route_with_parts(request, bootstrap, None, None)
 }
 
 /// Route with adapter-resolved data for every shared Host operation. Existing
@@ -1418,7 +1407,6 @@ pub fn route_with_context(
     route_with_parts(
         request,
         context.and_then(|value| value.bootstrap.as_ref()),
-        context.map(|value| &value.archived_sessions_by_project),
         None,
         None,
     )
@@ -1435,7 +1423,6 @@ pub fn route_with_create_context(
     route_with_parts(
         request,
         context.and_then(|value| value.bootstrap.as_ref()),
-        context.map(|value| &value.archived_sessions_by_project),
         create_context,
         None,
     )
@@ -1454,7 +1441,6 @@ pub fn route_with_effects(
     route_with_parts(
         request,
         context.and_then(|value| value.bootstrap.as_ref()),
-        context.map(|value| &value.archived_sessions_by_project),
         create_context,
         effects,
     )
@@ -1463,7 +1449,6 @@ pub fn route_with_effects(
 fn route_with_parts(
     request: &ControllerRequest,
     bootstrap: Option<&HostBootstrapContext>,
-    archived_sessions_by_project: Option<&HashMap<String, Vec<Value>>>,
     create_context: Option<&HostCreateContext>,
     effects: Option<&ControllerEffects>,
 ) -> Option<ControllerResponse> {
@@ -1472,22 +1457,10 @@ fn route_with_parts(
     // router cannot turn a Swift-owned request into a 400/409 or serialize two
     // fall-throughs around a cached `None`.
     if !replay_protected(request) || (lifecycle_effect_route(request) && effects.is_none()) {
-        return route_uncached(
-            request,
-            bootstrap,
-            archived_sessions_by_project,
-            create_context,
-            effects,
-        );
+        return route_uncached(request, bootstrap, create_context, effects);
     }
     let Some(request_id) = request.id.as_deref() else {
-        return route_uncached(
-            request,
-            bootstrap,
-            archived_sessions_by_project,
-            create_context,
-            effects,
-        );
+        return route_uncached(request, bootstrap, create_context, effects);
     };
     if request_id.is_empty() || request_id.len() > MAX_REQUEST_ID_BYTES {
         return Some(ControllerResponse {
@@ -1546,13 +1519,7 @@ fn route_with_parts(
     }
 
     let mut completion = ReplayLeaderGuard::new(Arc::clone(&entry), request.id.clone());
-    let response = route_uncached(
-        request,
-        bootstrap,
-        archived_sessions_by_project,
-        create_context,
-        effects,
-    );
+    let response = route_uncached(request, bootstrap, create_context, effects);
     completion.complete(response.clone());
 
     // An unhandled route belongs to a compatibility adapter, so wake any
@@ -1578,7 +1545,6 @@ fn route_with_parts(
 fn route_uncached(
     request: &ControllerRequest,
     bootstrap: Option<&HostBootstrapContext>,
-    archived_sessions_by_project: Option<&HashMap<String, Vec<Value>>>,
     create_context: Option<&HostCreateContext>,
     effects: Option<&ControllerEffects>,
 ) -> Option<ControllerResponse> {
@@ -1656,38 +1622,6 @@ fn route_uncached(
                     });
                 }
             }
-        }
-        ("GET", "/mobile/archive") => {
-            let Some(project_id) = request
-                .query
-                .get("project_id")
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-            else {
-                return Some(ControllerResponse {
-                    id: request.id.clone(),
-                    status: 400,
-                    body: json!({ "error": "project_id required" }),
-                });
-            };
-            let Some(projects) = archived_sessions_by_project else {
-                return Some(ControllerResponse {
-                    id: request.id.clone(),
-                    status: 500,
-                    body: json!({ "error": "archive context unavailable" }),
-                });
-            };
-            let Some(sessions) = projects.get(project_id) else {
-                return Some(ControllerResponse {
-                    id: request.id.clone(),
-                    status: 404,
-                    body: json!({ "error": "unknown project" }),
-                });
-            };
-            json!({
-                "projectID": project_id,
-                "sessions": sessions,
-            })
         }
         ("POST", "/mobile/sessions") => {
             let context = create_context?;
@@ -3058,91 +2992,6 @@ mod tests {
         assert_eq!(response.body["remoteServerPort"], 7123);
         assert_eq!(response.body["hostProtocol"]["majorVersion"], 1);
         assert_eq!(response.body["pendingApprovals"][0]["id"], "approval-1");
-    }
-
-    #[test]
-    fn route_context_keeps_archives_out_of_bootstrap() {
-        let mut archives = HashMap::new();
-        archives.insert(
-            "project-1".into(),
-            vec![json!({ "id": "archived-session", "title": "Secret history" })],
-        );
-        let context = HostRouteContext {
-            bootstrap: Some(HostBootstrapContext::headless(json!({ "sessions": [] }))),
-            archived_sessions_by_project: archives,
-        };
-
-        let response =
-            route_with_context(&request("GET", "/mobile/bootstrap"), Some(&context)).unwrap();
-        assert_eq!(response.status, 200);
-        assert!(response.body.get("archivedSessionsByProject").is_none());
-        assert!(!response.body.to_string().contains("Secret history"));
-    }
-
-    #[test]
-    fn archive_list_distinguishes_missing_unknown_and_known_empty_projects() {
-        let missing = route_with_context(&request("GET", "/mobile/archive"), None).unwrap();
-        assert_eq!(missing.status, 400);
-        assert_eq!(missing.body["error"], "project_id required");
-
-        let mut archive_request = request("GET", "/mobile/archive");
-        archive_request
-            .query
-            .insert("project_id".into(), "unknown".into());
-        let unavailable = route_with_context(&archive_request, None).unwrap();
-        assert_eq!(unavailable.status, 500);
-        assert_eq!(unavailable.body["error"], "archive context unavailable");
-
-        let unknown_context = HostRouteContext::default();
-        let unknown = route_with_context(&archive_request, Some(&unknown_context)).unwrap();
-        assert_eq!(unknown.status, 404);
-        assert_eq!(unknown.body["error"], "unknown project");
-
-        archive_request
-            .query
-            .insert("project_id".into(), "project-1".into());
-        let context = HostRouteContext {
-            bootstrap: None,
-            archived_sessions_by_project: HashMap::from([("project-1".into(), Vec::new())]),
-        };
-        let known = route_with_context(&archive_request, Some(&context)).unwrap();
-        assert_eq!(known.status, 200);
-        assert_eq!(
-            known.body,
-            json!({ "projectID": "project-1", "sessions": [] })
-        );
-    }
-
-    #[test]
-    fn archive_list_preserves_adapter_resolved_session_json() {
-        let session = json!({
-            "id": "session-1",
-            "projectID": "project-1",
-            "title": "Archived",
-            "command": "claude",
-            "createdAtUnixMs": 42,
-            "status": "exited",
-            "activity": "idle",
-            "unread": false,
-            "pinned": false,
-            "archived": true,
-        });
-        let context = HostRouteContext {
-            bootstrap: None,
-            archived_sessions_by_project: HashMap::from([(
-                "project-1".into(),
-                vec![session.clone()],
-            )]),
-        };
-        let mut archive_request = request("GET", "/mobile/archive");
-        archive_request
-            .query
-            .insert("project_id".into(), " project-1 ".into());
-
-        let response = route_with_context(&archive_request, Some(&context)).unwrap();
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body["projectID"], "project-1");
-        assert_eq!(response.body["sessions"], json!([session]));
     }
 
     #[test]

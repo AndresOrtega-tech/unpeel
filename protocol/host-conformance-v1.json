@@ -531,39 +531,6 @@
       }
     },
     {
-      "id": "archive.missing-project",
-      "method": "GET",
-      "path": "/mobile/archive",
-      "expected": {
-        "native": 400,
-        "tui": 400
-      }
-    },
-    {
-      "id": "archive.unknown-project",
-      "method": "GET",
-      "path": "/mobile/archive",
-      "query": {
-        "project_id": "conformance-unknown"
-      },
-      "expected": {
-        "native": 404,
-        "tui": 404
-      }
-    },
-    {
-      "id": "archive.known-empty",
-      "method": "GET",
-      "path": "/mobile/archive",
-      "query": {
-        "project_id": "conformance-project"
-      },
-      "expected": {
-        "native": 200,
-        "tui": 200
-      }
-    },
-    {
       "id": "transcript.missing-session",
       "method": "GET",
       "path": "/mobile/transcript-markdown",

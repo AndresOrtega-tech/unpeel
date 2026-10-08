@@ -544,8 +544,8 @@ private struct HostAdvancedSettingsPanel: View {
                         title: "Advanced",
                         description: "\(scopeName)'s cleanup behavior, applied "
                             + "over the Host connection — the Host's own "
-                            + "auto-archive sweep uses these; the app never "
-                            + "archives on its own. Memory diagnostics are "
+                            + "auto-stop sweep uses these; the app never "
+                            + "stops sessions on its own. Memory diagnostics are "
                             + "per-instance and live in each workspace's own "
                             + "window."
                     )
@@ -555,7 +555,7 @@ private struct HostAdvancedSettingsPanel: View {
                 if let settings {
                     Section {
                         Picker(
-                            "Stop and archive idle sessions after",
+                            "Auto-stop inactive terminals",
                             selection: Binding(
                                 get: { draftMinutes ?? settings.autoStopArchiveMinutes },
                                 set: { minutes in
@@ -566,13 +566,13 @@ private struct HostAdvancedSettingsPanel: View {
                                 }
                             )
                         ) {
-                            ForEach(UnpeelStore.autoStopArchiveMinuteOptions, id: \.self) { minutes in
-                                Text(UnpeelStore.autoStopArchiveLabel(for: minutes)).tag(minutes)
+                            ForEach(UnpeelStore.autoStopMinuteOptions, id: \.self) { minutes in
+                                Text(UnpeelStore.autoStopLabel(for: minutes)).tag(minutes)
                             }
                         }
 
                         Picker(
-                            "Stopped or archived sessions shown in sidebar",
+                            "Stopped sessions shown in sidebar",
                             selection: Binding(
                                 get: { draftLimit ?? settings.sidebarStoppedLimit },
                                 set: { limit in
@@ -591,9 +591,10 @@ private struct HostAdvancedSettingsPanel: View {
                         SettingsSectionHeader(
                             title: "Cleanup",
                             description: "Idle sessions on \(scopeName) get the "
-                                + "same treatment as Stop and archive; nothing "
-                                + "is deleted. The sidebar limit hides older "
-                                + "stopped or archived rows without removing them."
+                                + "same treatment as Stop: the row stays, ready "
+                                + "to Resume, and nothing is deleted. The sidebar "
+                                + "limit hides older stopped rows without "
+                                + "removing them; search still finds them."
                         )
                     }
                 } else {
@@ -4425,8 +4426,7 @@ struct FeaturesSettingsPanel: View {
 // MARK: - Advanced panel (settings/AdvancedPanel.svelte)
 
 /// Native Advanced panel: memory usage, running terminal hosts (with
-/// Stop and archive),
-/// cleanup policy, and diagnostics utilities.
+/// Stop), cleanup policy, and diagnostics utilities.
 struct AdvancedSettingsPanel: View {
     @ObservedObject var store: UnpeelStore
 
@@ -4469,27 +4469,27 @@ struct AdvancedSettingsPanel: View {
         Section {
             LabeledContent {
                 Picker(
-                    "Auto-stop and archive inactive terminals",
+                    "Auto-stop inactive terminals",
                     selection: Binding(
-                        get: { store.autoStopArchiveMinutes },
-                        set: { store.setAutoStopArchiveMinutes($0) }
+                        get: { store.autoStopMinutes },
+                        set: { store.setAutoStopMinutes($0) }
                     )
                 ) {
-                    ForEach(UnpeelStore.autoStopArchiveMinuteOptions, id: \.self) { minutes in
-                        Text(UnpeelStore.autoStopArchiveLabel(for: minutes)).tag(minutes)
+                    ForEach(UnpeelStore.autoStopMinuteOptions, id: \.self) { minutes in
+                        Text(UnpeelStore.autoStopLabel(for: minutes)).tag(minutes)
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .frame(width: 150)
             } label: {
-                Text("Auto-stop and archive inactive terminals")
+                Text("Auto-stop inactive terminals")
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.foreground)
             }
             LabeledContent {
                 Picker(
-                    "Stopped or archived sessions shown in sidebar",
+                    "Stopped sessions shown in sidebar",
                     selection: Binding(
                         get: { store.sidebarVisibleSessionLimit },
                         set: { store.setSidebarStoppedLimit($0) }
@@ -4503,14 +4503,14 @@ struct AdvancedSettingsPanel: View {
                 .pickerStyle(.menu)
                 .frame(width: 150)
             } label: {
-                Text("Stopped or archived sessions shown in sidebar")
+                Text("Stopped sessions shown in sidebar")
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.foreground)
             }
         } header: {
             SettingsSectionHeader(
                 title: "Cleanup",
-                description: "Sessions that have stayed idle for the selected time are stopped and archived — the same as clicking \"Stop and archive\": the terminal stops and the session files away into the project's archive library, where Restore & Resume continues the conversation. Sessions that keep working (including loops — any activity resets the clock), or that are pinned, selected, unread, or waiting for input, are left alone; plain shell terminals are never touched. Nothing is deleted automatically. Sessions that stop or die on their own are never archived automatically. Choose how many stopped or archived sessions each project previews; older rows are hidden from the sidebar only."
+                description: "Sessions that have stayed idle for the selected time are stopped — the same as clicking \"Stop\": the terminal stops and the row stays in the sidebar, where Resume continues the conversation. Sessions that keep working (including loops — any activity resets the clock), or that are pinned, selected, unread, or waiting for input, are left alone; plain shell terminals are never touched. Nothing is deleted automatically. Choose how many stopped sessions each project previews; older rows are hidden from the sidebar only, and search still finds them."
             )
         }
     }
@@ -4582,7 +4582,7 @@ struct AdvancedSettingsPanel: View {
     }
 
     /// System Settings login-items-style row: icon tile, label + sublabel,
-    /// trailing CPU/Memory cells + Open / Stop and archive buttons.
+    /// trailing CPU/Memory cells + Open / Stop buttons.
     private func terminalRow(_ terminal: RunningTerminal) -> some View {
         let isRemoving = store.removingSessionIDs.contains(terminal.id)
         return HStack(alignment: .center, spacing: 12) {
@@ -4631,9 +4631,9 @@ struct AdvancedSettingsPanel: View {
                 .controlSize(.small)
                 .disabled(isRemoving)
 
-                if store.sessionCanArchive(terminal.id) {
-                    Button("Stop and archive") {
-                        store.archiveSession(terminal.id)
+                if store.sessionCanStop(terminal.id) {
+                    Button("Stop") {
+                        store.confirmStopSession(terminal.id)
                         terminals.removeAll { $0.id == terminal.id }
                     }
                     .controlSize(.small)

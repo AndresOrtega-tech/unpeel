@@ -15,7 +15,7 @@ enum ProviderCapabilities {
     /// Resume Agent.
     static let resumeAgentHostProtocolVersion = 3
 
-    /// Static runtime support only. Effective Resume/Archive also requires
+    /// Static runtime support only. Effective Resume/Stop also requires
     /// `SessionEntry.hasResumableState`; recognizing a CLI or pre-assigning a
     /// provider id does not prove this particular launch created a session.
     static func canRestart(command: String) -> Bool {
@@ -24,7 +24,10 @@ enum ProviderCapabilities {
         return SetupTool.detect(in: trimmed)?.metadata?.capabilities.contains(.resume) == true
     }
 
-    static func canArchive(session: SessionEntry) -> Bool {
+    /// Host-proven resumability: this launch created a conversation the
+    /// runtime can continue. Gates Resume on stopped rows and the sidebar's
+    /// Stop (versus Remove) on live ones.
+    static func isResumable(session: SessionEntry) -> Bool {
         session.hasResumableState && canRestart(command: session.command)
     }
 
@@ -70,7 +73,7 @@ enum ProviderCapabilities {
             // Legacy `session.restart` replaces the terminal and is now the
             // stopped-Session Resume operation. Live Sessions advertise the
             // separate in-place `resumeAgent` capability instead.
-            restart: !session.isLive && canArchive(session: session),
+            restart: !session.isLive && isResumable(session: session),
             // Decode-only compatibility field. New Hosts never advertise the
             // old active-runtime restart affordance.
             restartAgent: nil,
@@ -83,12 +86,9 @@ enum ProviderCapabilities {
                 hostProtocolVersion: session.hostProtocolVersion
             ),
             notifyWhenDone: canNotifyWhenDone(session: session),
-            // Archive is offered only for resumable commands — filing away
-            // a session whose CLI can't resume just strands it in the
-            // library, so non-resumable sessions offer Remove instead. (The
-            // flag also hides the verb against older Macs whose organization
-            // patch ignores `archived`.)
-            archive: canArchive(session: session)
+            // Resume evidence: Controllers offer Stop (keeping a resumable
+            // stopped row) only for resumable launches; the rest get Remove.
+            resumable: isResumable(session: session)
         )
     }
 }

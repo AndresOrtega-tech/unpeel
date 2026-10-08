@@ -586,8 +586,7 @@ final class RemotePreviewStoreTests: XCTestCase {
             activeRuntimeID: String? = nil,
             runtimeLaunchPending: Bool = false,
             restart: Bool = false,
-            resumeAgent: Bool? = true,
-            archived: Bool = false
+            resumeAgent: Bool? = true
         ) -> RemoteSessionSummary {
             RemoteSessionSummary(
                 id: "session", projectID: "project",
@@ -600,8 +599,7 @@ final class RemotePreviewStoreTests: XCTestCase {
                     restart: restart,
                     resumeAgent: resumeAgent,
                     notifyWhenDone: false
-                ),
-                archived: archived
+                )
             )
         }
 
@@ -642,22 +640,20 @@ final class RemotePreviewStoreTests: XCTestCase {
         XCTAssertEqual(
             sessionOrganizeResumePresentation(
                 session: session(
-                    status: .exited, restart: false,
-                    resumeAgent: nil, archived: true
+                    status: .exited, restart: false, resumeAgent: nil
                 ),
                 hostProtocol: currentHost
             ),
-            .restore
+            .none
         )
         XCTAssertEqual(
             sessionOrganizeResumePresentation(
                 session: session(
-                    status: .exited, restart: true,
-                    resumeAgent: nil, archived: true
+                    status: .exited, restart: true, resumeAgent: nil
                 ),
                 hostProtocol: currentHost
             ),
-            .restoreAndResume
+            .resumeSession
         )
     }
 
@@ -682,9 +678,7 @@ final class RemotePreviewStoreTests: XCTestCase {
     }
 
     func testReplacementCorrelationIgnoresBaselineCollisionsAndDecoys() {
-        let source = replacementSession(
-            id: "source", status: .exited, archived: true
-        )
+        let source = replacementSession(id: "source", status: .exited)
         let baselineCollision = replacementSession(id: "baseline")
         let exact = replacementSession(
             id: "exact", command: "claude --resume thread"
@@ -701,7 +695,7 @@ final class RemotePreviewStoreTests: XCTestCase {
                 id: "wrong-runtime", command: "codex resume thread", providerID: "codex"
             ),
             replacementSession(id: "wrong-worktree", worktreePath: "/other"),
-            replacementSession(id: "still-archived", archived: true),
+            replacementSession(id: "still-stopped", status: .exited),
         ]
 
         XCTAssertEqual(
@@ -722,9 +716,7 @@ final class RemotePreviewStoreTests: XCTestCase {
     }
 
     func testReplacementCorrelationCancelsOnAmbiguityAndBoundedExpiry() {
-        let source = replacementSession(
-            id: "source", status: .exited, archived: true
-        )
+        let source = replacementSession(id: "source", status: .exited)
         let intent = RemotePreviewStore.ReplacementSelectionIntent(
             source: source,
             hostMacID: "mac",
@@ -1175,7 +1167,7 @@ final class RemotePreviewStoreTests: XCTestCase {
         )
     }
 
-    func testSidebarMixAlwaysMovesArchivesBelowFoldersAndRegularSessions() {
+    func testSidebarMixKeepsStoppedRowsInHostRankOrder() {
         let group = RemoteProjectSummary(
             id: "group-research",
             name: "Research",
@@ -1183,19 +1175,19 @@ final class RemotePreviewStoreTests: XCTestCase {
             parentProjectID: "project-unpeel",
             isGroup: true
         )
+        // Archive is retired: a stopped row is an ordinary row and keeps
+        // the Host's mixed rank instead of being pushed below everything.
         let regular = replacementSession(id: "regular")
-        let archived = replacementSession(
-            id: "archived", status: .exited, archived: true
-        )
+        let stopped = replacementSession(id: "stopped", status: .exited)
 
         XCTAssertEqual(
             IOSSidebarProjectTree.mixedRegularItems(
-                sessions: [archived, regular],
+                sessions: [stopped, regular],
                 folders: [group],
-                order: ["archived", "group-research", "regular"],
+                order: ["stopped", "group-research", "regular"],
                 dateSorted: false
             ).map(\.id),
-            ["group-research", "regular", "archived"]
+            ["stopped", "group-research", "regular"]
         )
     }
 
@@ -2034,8 +2026,7 @@ final class RemotePreviewStoreTests: XCTestCase {
         status: RemoteSessionStatus = .running,
         providerID: String? = "claude",
         worktreePath: String? = "/worktree",
-        worktreeBranch: String? = "topic",
-        archived: Bool = false
+        worktreeBranch: String? = "topic"
     ) -> RemoteSessionSummary {
         RemoteSessionSummary(
             id: id,
@@ -2051,8 +2042,7 @@ final class RemotePreviewStoreTests: XCTestCase {
             capabilities: RemoteSessionCapabilities(
                 restart: status == .exited,
                 notifyWhenDone: false
-            ),
-            archived: archived
+            )
         )
     }
 

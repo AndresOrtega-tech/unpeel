@@ -864,16 +864,16 @@ pub struct AppState {
     /// only when no native adapter can persist the color.
     #[serde(default)]
     pub project_colors: HashMap<String, String>,
-    /// Auto-stop-and-archive cutoff in minutes: sessions continuously idle
-    /// this long are stopped and archived (the non-destructive Stop verb —
-    /// Restore + Restart resumes). Shared knob for the app and the TUI.
+    /// Auto-stop cutoff in minutes (the key keeps its archive-era name):
+    /// resumable sessions continuously idle this long are stopped and stay
+    /// resumable stopped rows. Shared knob for the app and the Host.
     /// None = key absent = on at the default cutoff (1 day, opt-out);
     /// explicit 0 = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_stop_archive_minutes: Option<u64>,
-    /// Compatibility key for how many naturally stopped and archived rows
-    /// combined each sidebar group previews. Hidden stopped rows are not filed
-    /// or deleted. Shared knob for the app and the TUI. None = key absent =
+    /// Compatibility key for how many stopped rows each sidebar group
+    /// previews. Hidden stopped rows are not deleted. Shared knob for the app
+    /// and the Host. None = key absent =
     /// the default window (5). Explicit 0 = no inactive preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_stopped_limit: Option<u64>,

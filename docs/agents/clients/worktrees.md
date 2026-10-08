@@ -28,7 +28,7 @@ Sessions can run in a git worktree of the project instead of the main checkout, 
 - Worktrees are created before Sessions launch. The project context menu's **"New worktree…"** dialog and Settings ▸ Worktrees provide explicit branch/base-ref control and register the child project without starting a Session. Alternatively — opt-in, 2026-07-19 — the sessions tool's **`create_worktree`**/`list_worktrees` actions can prepare one (gated on `AppState.mcp_worktree_access`, the "Let sessions create worktrees" toggle in Settings ▸ Worktrees / Settings ▸ Sessions use; default off, host re-reads per call; bridge routes `/mcp/create-worktree|list-worktrees`). Once the child project appears, launch the Session from that row. The MCP path never launches a Session and never exposes removal; agent inputs are constrained — `branch` via `git check-ref-format`, folder `name` slugified to `[A-Za-z0-9-_.]`, flag-shaped `base_ref` refused at the bridge.
 - **Default base ref is the mainline, not HEAD** (2026-07-19): when no base is picked, `WorktreeGit.createWorktree` forks new branches from `defaultBaseRef` — `origin/<default>` (via the `origin/HEAD` symref, falling back to `origin/main`/`origin/master`, then local `main`/`master`), freshened by `bestEffortFetch` (non-interactive `GIT_TERMINAL_PROMPT=0`, 5s timeout, failure ignored — offline must never block creation); no recognizable mainline → HEAD, the old behavior. The "New worktree…" dialog's Start-from popup lists local + remote-tracking branches and pre-selects the mainline. Controller-driven starts with explicit worktree fields and MCP creation reuse `sessionLaunchTarget` (`MCPBridge.swift`): reuse existing child project → adopt existing checkout → create branch + worktree.
 - `SessionInfo` carries optional `worktree_path` / `worktree_branch`; stopped
-  **Resume**, archived **Restore & Resume**, and terminal reload re-spawn inside
+  **Resume** and terminal reload re-spawn inside
   the worktree, while same-PTY **Resume Agent** never leaves it.
 - No special agent integration is needed: inside a worktree, git behaves like a normal checkout, so provider CLIs work unchanged.
 
@@ -75,8 +75,9 @@ manifest's `project_id` stays the launch truth. Helpers:
 `session_ops::{set,clear}_project_override` (Rust) and
 `SharedMarker.projectOverride` (Swift); writes announce `session-markers`.
 A stale target falls back to the manifest project. The explicit **Remove
-group** verb first unpins, rehomes, and archives every contained session under
-the parent, then deletes the group record; this keeps sessions launched from a
+group** verb first unpins and rehomes every contained session under the
+parent (sessions keep running or stay stopped as they were), then deletes the
+group record; this keeps sessions launched from a
 group's own "+" reachable even though their manifest project is the removed
 group id. In the native app,
 session rows can also be dragged directly onto plain group rows; worktree rows

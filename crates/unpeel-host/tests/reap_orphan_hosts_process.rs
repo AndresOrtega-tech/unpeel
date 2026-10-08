@@ -142,11 +142,12 @@ fn reaps_a_filed_host_and_leaves_a_running_one() {
         "hosts should be alive"
     );
 
-    // File the first session while its host keeps running: drop an
-    // `archived.json` marker beside it. (The manifest state is left to the
-    // live host — it heartbeats `running` continuously, so editing state here
-    // would just be overwritten; the archived marker is the stable "filed"
-    // signal the reaper also acts on, and the host never clears it.)
+    // File the first session while its host keeps running: drop a legacy
+    // `archived.json` marker beside it, as an older Host's Archive left it.
+    // (The manifest state is left to the live host — it heartbeats `running`
+    // continuously, so editing state here would just be overwritten; the
+    // legacy marker is the stable "filed" signal the reaper still acts on,
+    // and the startup migration skips a running manifest.)
     fs::write(
         home.join("app-sessions")
             .join("filed")

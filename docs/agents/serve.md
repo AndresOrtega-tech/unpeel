@@ -92,7 +92,7 @@ The native client-only migration is development-gated. In an explicitly
 branded Unpeel Dev bundle, the app's own Local sidebar/projects/Sessions/preset
 reads and the existing protocol-minor-8 lifecycle/organization verbs use its
 workspace worker over `host.sock`, through the same `RemoteHostRuntime` used
-for other Host scopes. This includes create, stop, archive/restore/remove,
+for other Host scopes. This includes create, stop, remove,
 restart/resume, rename, pin, move, and project/Session ordering. Once the
 Local client starts, semantic effects fail closed during worker recovery;
 an unavailable socket cannot silently reactivate the duplicate Swift engine.
@@ -225,26 +225,41 @@ lock-race adoption, crash-loop ceiling) and the PTY case
 nothing; gate on adopts a fake core; `kill -9` of the worker leaves the core,
 socket, and record untouched; the restarted worker re-adopts).
 
-### Auto-stop-and-archive sweep: why a Session is not archived
+### Auto-stop sweep: why a Session was not stopped
 
-`sweep_auto_archive` runs on every rescan tick (1 s). A running row is due
-only when ALL hold: status Idle, `archive_available` (a resumable
-conversation: `session_ops::can_archive_manifest` — a provider session id
-plus transcript resume data or a real lifecycle hook; plain shells and an
-agent that has not completed a turn never qualify), not pinned / archived,
-not **unread attention** (a Session waiting on the user who has not seen
-the question is never archived unseen; a merely unread idle Session DOES
-archive after the cutoff — decided 2026-09-04 for headless Hosts, where
-nobody views anything, ships in 0.5.1; archive is non-destructive and the
-unread badge survives it), no attempt pending, and idle for the whole cutoff as observed by
-THIS worker (the clock starts at the later of the row's idle start and the
-worker's start, so a Host restart is never a mass archive). The cutoff is
-`auto_stop_archive_minutes` and accepts only 0/30/60/120/240/480/1440 —
-any other value reads as off. Since 2026-09-03 the sweep traces the FIRST
-blocking condition per row, once per reason change (`host-worker
-auto-archive skips <id>: unread attention (waiting on the user; never
-auto-archived unseen)` / `no resumable conversation …` / `idle for less than the
-cutoff` / `pinned` / …), so "why did this never archive" is one grep.
+`sweep_auto_stop` (`auto_stop.rs`) runs on every rescan tick (1 s) and gives
+a due Session the plain Stop verb: it becomes a resumable stopped row and
+its scrollback is dropped. A running row is due only when ALL hold: status
+Idle, `resumable` (a resumable conversation:
+`session_ops::has_resume_evidence` — a provider session id plus transcript
+resume data or a real lifecycle hook; plain shells and an agent that has not
+completed a turn never qualify), not pinned, not **unread attention** (a
+Session waiting on the user who has not seen the question is never stopped
+unseen; a merely unread idle Session DOES stop after the cutoff — decided
+2026-09-04 for headless Hosts, where nobody views anything), no attempt
+pending, and idle for the whole cutoff as observed by THIS worker (the clock
+starts at the later of the row's idle start and the worker's start, so a
+Host restart is never a mass stop). The cutoff is `auto_stop_archive_minutes`
+(the key keeps its archive-era name) and accepts only
+0/30/60/120/240/480/1440 — any other value reads as off. The sweep traces the
+FIRST blocking condition per row, once per reason change (`host-worker
+auto-stop skips <id>: unread attention (waiting on the user; never
+auto-stopped unseen)` / `no resumable conversation …` / `idle for less than
+the cutoff` / `pinned` / …), so "why did this never stop" is one grep.
+
+### Archive removed (protocol minor 22)
+
+There is no archive: Stop is the only non-destructive end of a Session, and
+it keeps a resumable stopped row (manifest, title, provider id) while
+truncating `output.bin` — Resume never replays the old journal, and kept
+journals were what grew `app-sessions/` into gigabytes. Each worker start
+runs `session_ops::migrate_archived_sessions`, which turns every legacy
+`archived.json` beside a non-running manifest into a plain stopped row
+(marker and scrollback dropped). `session.archive`, `session.archive.list`,
+and `session.restore` are withdrawn; an older Controller's `archived: true`
+organization patch runs Stop and `archived: false` is a no-op, and summaries
+pin `archived`/`capabilities.archive` to false while `capabilities.resumable`
+carries the resume evidence.
 
 ### Browser engine install (`serve.json.browserEngine`)
 
@@ -344,7 +359,7 @@ Since 0.4.0 this path is the release default in every build and channel,
 and since 2026-09-03 it is the ONLY path: the compatibility Swift Host
 (`MobileRemoteServer`, `RemoteControlManager`, `MCPBridge`, the Swift Relay
 uplink, hook ingestion, provider hook-asset installs, and the store's
-spawn/kill/reap/auto-archive half) is deleted, there is no Settings switch,
+spawn/kill/reap/auto-stop half) is deleted, there is no Settings switch,
 and the app never reads `UNPEEL_DEV_LOCAL_HOST_CLIENT` (the terminal UI that
 once did was removed 2026-09-03).
 `LocalHostClientFeature.resolveForLaunch` runs once per launch: it restarts

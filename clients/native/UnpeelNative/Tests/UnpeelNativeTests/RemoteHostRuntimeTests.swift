@@ -295,123 +295,6 @@ final class RemoteHostRuntimeTests: XCTestCase {
         runtime.disconnect()
     }
 
-    func testRestoreAndRestartSelectsOnlyTheExactPublishedReplacement() async throws {
-        let backend = ControlledRemoteBackend()
-        let runtime = makeRuntime(
-            backend: backend,
-            refreshIntervalNanoseconds: 1_000_000
-        )
-        let current = makeSession(
-            id: "current", activity: .blocked, providerID: "claude"
-        )
-        let preexistingCollision = makeSession(
-            id: "preexisting-collision", createdAt: 42, providerID: "claude"
-        )
-        let source = makeSession(
-            id: "archived-source", createdAt: 42, status: .exited,
-            providerID: "claude", archived: true
-        )
-        let capabilities = [
-            "host.bootstrap",
-            "session.input.write",
-            "session.output.read",
-            RemoteHostRuntime.HostOperation.restore,
-            RemoteHostRuntime.HostOperation.restart,
-        ]
-
-        runtime.connectSSH(target: "ssh://host", expectedHostID: "host")
-        await waitUntil { await backend.bootstrapCount == 1 }
-        await backend.resolveBootstrap(.success(makeSnapshot(
-            capabilities: capabilities,
-            sessions: [current, preexistingCollision]
-        )))
-        await waitUntil { runtime.selectedSessionID == current.id }
-
-        try await runtime.restoreAndRestartSession(
-            source,
-            knownSessionIDs: [current.id, preexistingCollision.id, source.id]
-        )
-        let organizationCalls = await backend.organizationCalls
-        XCTAssertEqual(
-            organizationCalls,
-            ["restore:\(source.id)", "restart:\(source.id)"]
-        )
-
-        // Restore can publish the old id before Restart publishes its new
-        // one. Keep the user's prior selection during that intermediate row.
-        await waitUntil { await backend.bootstrapCount >= 2 }
-        await backend.resolveBootstrap(.success(makeSnapshot(
-            capabilities: capabilities,
-            sessions: [current, preexistingCollision, makeSession(
-                id: source.id, createdAt: 42, status: .exited,
-                providerID: "claude"
-            )]
-        )))
-        XCTAssertEqual(runtime.selectedSessionID, current.id)
-
-        let replacement = makeSession(
-            id: "exact-replacement", command: "claude --resume thread-1",
-            createdAt: 42, providerID: "claude"
-        )
-        await waitUntil { await backend.bootstrapCount >= 3 }
-        await backend.resolveBootstrap(.success(makeSnapshot(
-            capabilities: capabilities,
-            sessions: [current, preexistingCollision, replacement]
-        )))
-        await waitUntil { runtime.selectedSessionID == replacement.id }
-        runtime.disconnect()
-    }
-
-    func testArchivedFetchSurvivesLiveBootstrapAndStillSubmitsRestoreAndRestart() async throws {
-        let backend = ControlledRemoteBackend()
-        let runtime = makeRuntime(backend: backend)
-        let current = makeSession(
-            id: "current", activity: .blocked, providerID: "codex"
-        )
-        let source = makeSession(
-            id: "archived-source", createdAt: 42, status: .exited,
-            providerID: "claude", archived: true
-        )
-        let capabilities = [
-            "host.bootstrap",
-            "session.input.write",
-            "session.output.read",
-            RemoteHostRuntime.HostOperation.restore,
-            RemoteHostRuntime.HostOperation.restart,
-        ]
-
-        // Archive fetches are page-scoped and intentionally separate from
-        // the live bootstrap dictionary. A subsequent normal bootstrap only
-        // prunes vanished projects; it must not erase the archived source.
-        var archivedCache = RemoteArchivedSessionSummaryCache()
-        archivedCache.replaceProject("project", summaries: [source])
-        let liveSummaries = [current.id: current]
-        archivedCache.retainProjects(["project"])
-        XCTAssertNil(liveSummaries[source.id])
-        let cachedSource = try XCTUnwrap(archivedCache[source.id])
-        let knownSessionIDs = Set(liveSummaries.keys)
-            .union(archivedCache.sessionIDs)
-
-        runtime.connectSSH(target: "ssh://host", expectedHostID: "host")
-        await waitUntil { await backend.bootstrapCount == 1 }
-        await backend.resolveBootstrap(.success(makeSnapshot(
-            capabilities: capabilities,
-            sessions: Array(liveSummaries.values)
-        )))
-        await waitUntil { runtime.connectionState == .connected(name: "Host") }
-
-        try await runtime.restoreAndRestartSession(
-            cachedSource,
-            knownSessionIDs: knownSessionIDs
-        )
-        let calls = await backend.organizationCalls
-        XCTAssertEqual(calls, [
-            "restore:\(source.id)",
-            "restart:\(source.id)",
-        ])
-        runtime.disconnect()
-    }
-
     func testOrdinaryRestartSelectsOnlyItsExactReplacement() async throws {
         let backend = ControlledRemoteBackend()
         let runtime = makeRuntime(
@@ -470,7 +353,7 @@ final class RemoteHostRuntimeTests: XCTestCase {
         let source = makeSession(
             id: "source", projectID: "project", command: "claude",
             createdAt: 42, status: .exited, providerID: "claude",
-            worktreePath: "/worktree", worktreeBranch: "topic", archived: true
+            worktreePath: "/worktree", worktreeBranch: "topic"
         )
         let intent = RemoteHostRuntime.ReplacementSelectionIntent(
             source: source,
@@ -684,8 +567,6 @@ final class RemoteHostRuntimeTests: XCTestCase {
                 "session.output.read",
                 RemoteHostRuntime.HostOperation.titleSet,
                 RemoteHostRuntime.HostOperation.pinSet,
-                RemoteHostRuntime.HostOperation.archive,
-                RemoteHostRuntime.HostOperation.restore,
                 RemoteHostRuntime.HostOperation.stop,
                 RemoteHostRuntime.HostOperation.remove,
                 RemoteHostRuntime.HostOperation.restart,
@@ -704,8 +585,6 @@ final class RemoteHostRuntimeTests: XCTestCase {
         XCTAssertEqual(runtime.selectedSessionID, "session")
         try await runtime.renameSession("session", to: "Renamed")
         try await runtime.setSessionPinned("session", pinned: true)
-        try await runtime.archiveSession("session")
-        try await runtime.restoreSession("session")
         try await runtime.stopSession("session")
         try await runtime.removeSession("session")
         try await runtime.resumeAgent("session")
@@ -728,8 +607,6 @@ final class RemoteHostRuntimeTests: XCTestCase {
         XCTAssertEqual(organizationCalls, [
             "title:session:Renamed",
             "pin:session:true",
-            "archive:session",
-            "restore:session",
             "stop:session",
             "remove:session",
             "resume-agent:session",
@@ -3060,7 +2937,6 @@ final class RemoteHostRuntimeTests: XCTestCase {
         providerID: String? = nil,
         worktreePath: String? = nil,
         worktreeBranch: String? = nil,
-        archived: Bool = false,
         latestAlertBody: String? = nil,
         latestAlertAt: Int64? = nil
     ) -> RemoteSessionSummary {
@@ -3080,7 +2956,6 @@ final class RemoteHostRuntimeTests: XCTestCase {
             worktreePath: worktreePath,
             worktreeBranch: worktreeBranch,
             lastOutputPreview: preview,
-            archived: archived,
             latestAlertBody: latestAlertBody,
             latestAlertAtUnixMs: latestAlertAt
         )
@@ -3381,16 +3256,6 @@ private actor ControlledRemoteBackend: NativeRemoteBackendProtocol {
         return NativeRemoteEffectReceipt(requestID: 901)
     }
 
-    func archiveSession(sessionID: String) async throws -> NativeRemoteEffectReceipt {
-        organizationCalls.append("archive:\(sessionID)")
-        return NativeRemoteEffectReceipt(requestID: 902)
-    }
-
-    func restoreSession(sessionID: String) async throws -> NativeRemoteEffectReceipt {
-        organizationCalls.append("restore:\(sessionID)")
-        return NativeRemoteEffectReceipt(requestID: 903)
-    }
-
     func stopSession(sessionID: String) async throws -> NativeRemoteEffectReceipt {
         organizationCalls.append("stop:\(sessionID)")
         return NativeRemoteEffectReceipt(requestID: 904)
@@ -3481,11 +3346,6 @@ private actor ControlledRemoteBackend: NativeRemoteBackendProtocol {
             code: "invalid_pairing_invitation",
             message: "invalid test pairing invitation"
         )
-    }
-
-    func listArchivedSessions(projectID: String) async throws -> [RemoteSessionSummary] {
-        organizationCalls.append("archived:\(projectID)")
-        return []
     }
 
     func transcriptMarkdown(

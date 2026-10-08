@@ -365,12 +365,10 @@ struct RootView: View {
             if store.sidebarCollapsed {
                 // While a full-content page covers the workspace, "+" (new
                 // session) is the wrong verb — offer the way back instead.
-                if store.settingsVisible || store.recentActivityVisible
-                    || store.archivedProjectID != nil {
+                if store.settingsVisible || store.recentActivityVisible {
                     TitlebarIconButton(icon: .back, help: "Back to workspace") {
                         if store.settingsVisible { store.closeSettings() }
                         store.recentActivityVisible = false
-                        store.archivedProjectID = nil
                     }
                 } else {
                     CollapsedNewSessionControl(
@@ -483,7 +481,7 @@ struct RootView: View {
 }
 
 /// The window title strip: the current page's title. Settings and the
-/// main-pane libraries (All recent, Archived) show their breadcrumb; the
+/// main-pane library (All recent) shows their breadcrumb; the
 /// workspace shows the project breadcrumb + branch with its chips.
 private struct WindowTitleStrip: View {
     @ObservedObject var store: UnpeelStore

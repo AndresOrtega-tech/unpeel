@@ -110,38 +110,6 @@ final class NativeControllerRouterTests: XCTestCase {
         )
     }
 
-    func testArchiveContextCrossesNativeBridge() throws {
-        let context = try JSONSerialization.data(withJSONObject: [
-            "archivedSessionsByProject": [
-                "project-1": [[
-                    "id": "archived-1",
-                    "projectID": "project-1",
-                    "title": "Archived session",
-                ]],
-            ],
-        ])
-        let result = NativeControllerRouter.shared.route(
-            requestID: "archive-request",
-            method: "GET",
-            path: "/mobile/archive",
-            query: ["project_id": "project-1"],
-            headers: [:],
-            body: Data(),
-            principal: principal,
-            routeContext: context
-        )
-        guard case .handled(let response) = result else {
-            return XCTFail("expected Rust to own archive listing, got \(result)")
-        }
-        XCTAssertEqual(response.status, 200)
-        let body = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: Any]
-        )
-        XCTAssertEqual(body["projectID"] as? String, "project-1")
-        let sessions = try XCTUnwrap(body["sessions"] as? [[String: Any]])
-        XCTAssertEqual(sessions.first?["id"] as? String, "archived-1")
-    }
-
     func testUnknownRouteReturnsUnhandled() {
         let result = NativeControllerRouter.shared.route(
             requestID: nil,

@@ -248,7 +248,6 @@ public final class RemotePreviewStore {
                 organizeTargetSessionID = nil
                 organizeTargetProjectID = nil
                 terminalTextSelection = nil
-                archiveLibraryProjectID = nil
             }
         }
     }
@@ -260,52 +259,10 @@ public final class RemotePreviewStore {
     /// long-press on a sidebar row) rather than the currently-open one, this
     /// holds that target. `nil` ⇒ organize the selected session (title press).
     public var organizeTargetSessionID: String?
-    /// Which project's archive library the `.archive` top-bar sheet shows
-    /// (set by the project's organize sheet before presenting).
-    public var archiveLibraryProjectID: String?
     /// The project/group the `.organizeProject` sheet acts on (sidebar
     /// folder-row long-press). Lives only as long as the sheet.
     public var organizeTargetProjectID: String?
 
-    /// Restore an archived session on the Mac (and optionally restart it so
-    /// the conversation resumes). The combined path latches its correlation
-    /// before Restore, because that first effect can publish the old id before
-    /// Restart replaces it and neither receipt carries the replacement id.
-    public func restoreArchivedSession(
-        _ session: RemoteSessionSummary,
-        resume: Bool
-    ) async -> Bool {
-        if resume, !beginReplacementSelection(for: session) {
-            lastError = "Another session is still being resumed"
-            return false
-        }
-        do {
-            try await client.updateSessionOrganization(
-                RemoteSessionOrganizationPatch(sessionID: session.id, archived: false)
-            )
-        } catch {
-            // Restart was never submitted, so no replacement can appear even
-            // if the Restore transport result itself was ambiguous.
-            if resume { clearReplacementSelection(resetDefaultSuppression: true) }
-            let reason = (error as? RemoteMacClientError)?.description
-                ?? error.localizedDescription
-            lastError = reason.isEmpty ? "Could not restore the session" : reason
-            return false
-        }
-        if resume {
-            do {
-                try await requestSessionRestart(sessionID: session.id)
-            } catch {
-                handleReplacementEffectFailure(error)
-                let reason = (error as? RemoteMacClientError)?.description
-                    ?? error.localizedDescription
-                lastError = reason.isEmpty ? "Could not resume the session" : reason
-                return false
-            }
-        }
-        await loadFromBridge()
-        return true
-    }
     public var expandedProjectIDs: Set<String> = []
     /// Folder accordion: at most one folder group is open at a time. Loose
     /// (unfoldered) projects are always visible.
@@ -495,7 +452,6 @@ public final class RemotePreviewStore {
                   session.projectID == intent.projectID,
                   session.createdAtUnixMs == intent.createdAtUnixMs,
                   session.status == .running,
-                  !session.archived,
                   session.worktreePath == intent.worktreePath,
                   session.worktreeBranch == intent.worktreeBranch
             else { return false }
@@ -740,7 +696,7 @@ public final class RemotePreviewStore {
 
     /// Whether the connected Host accepts folder organize patches (rename,
     /// color, session sort). Older Macs don't serve the route — the sheet
-    /// hides its editing controls and offers only the archive library.
+    /// hides its editing controls and asks for a Mac update.
     public var supportsProjectOrganization: Bool {
         guard let hostProtocol = snapshot.hostProtocol else { return false }
         return hostProtocol.isCompatible()
@@ -1119,17 +1075,13 @@ public final class RemotePreviewStore {
         )
     }
 
-    /// Rename, (un)pin, and/or archive a session on the Mac, then refresh the
-    /// snapshot so the change shows immediately instead of on the next poll.
-    /// Archiving stops the session on the Mac and files it into the project's
-    /// Archived section there; archived sessions drop out of the phone
-    /// snapshot entirely. Returns false (and sets lastError) when the Mac
-    /// rejected it.
+    /// Rename and/or (un)pin a session on the Mac, then refresh the snapshot
+    /// so the change shows immediately instead of on the next poll. Returns
+    /// false (and sets lastError) when the Mac rejected it.
     public func updateSessionOrganization(
         sessionID: String,
         title: String?,
         pinned: Bool?,
-        archived: Bool? = nil,
         notifyWhenDone: Bool? = nil
     ) async -> Bool {
         do {
@@ -1138,7 +1090,6 @@ public final class RemotePreviewStore {
                     sessionID: sessionID,
                     title: title,
                     pinned: pinned,
-                    archived: archived,
                     notifyWhenDone: notifyWhenDone
                 )
             )
@@ -1155,16 +1106,14 @@ public final class RemotePreviewStore {
     /// snapshot is reordered immediately so the dropped arrangement holds
     /// while the Host write and next bootstrap are in flight.
     public func reorderSessions(projectID: String, orderedIDs: [String]) {
-        let archivedIDs = Set(snapshot.sessions.filter(\.archived).map(\.id))
-        let orderableIDs = orderedIDs.filter { !archivedIDs.contains($0) }
-        guard !orderableIDs.isEmpty else { return }
-        applyLocalSessionOrder(projectID: projectID, orderedIDs: orderableIDs)
+        guard !orderedIDs.isEmpty else { return }
+        applyLocalSessionOrder(projectID: projectID, orderedIDs: orderedIDs)
         Task {
             do {
                 try await client.updateSessionOrder(
                     RemoteSessionOrderRequest(
                         projectID: projectID,
-                        orderedSessionIDs: orderableIDs
+                        orderedSessionIDs: orderedIDs
                     )
                 )
             } catch {

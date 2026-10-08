@@ -28,8 +28,6 @@ def body(case):
         fail_routes=(
             "/state-changed",
             "/mcp/sidebar",
-            "/mcp/archive-session",
-            "/mcp/restore-session",
             "/mcp/mark-read",
         )
     )
@@ -44,23 +42,21 @@ def body(case):
         listed.stdout[:200],
     )
 
-    archived = run_cli(home, ["archive", "s-one"], timeout=45)
+    stopped = run_cli(home, ["stop", "s-one"], timeout=45)
+    output_path = home.path("app-sessions", "s-one", "output.bin")
     case.check(
-        "archive writes the shared marker even though the app 404s the ping",
-        archived.returncode == 0 and home.has_marker("s-one", "archived.json"),
-        archived.stderr[:200],
+        "stop completes on the shared files even though the app 404s the ping",
+        stopped.returncode == 0
+        and home.manifests().get("s-one", {}).get("state") == "exited"
+        and os.path.exists(output_path)
+        and os.path.getsize(output_path) == 0
+        and not home.has_marker("s-one", "archived.json"),
+        stopped.stderr[:200] + str(home.manifests().get("s-one", {}).get("state")),
     )
     case.check(
         "the older app was still told (and its 404 was harmless)",
         old_app.count("/state-changed") > 0,
         str(old_app.calls)[:200],
-    )
-
-    restored = run_cli(home, ["restore", "s-one"], timeout=45)
-    case.check(
-        "restore clears the marker without any app route",
-        restored.returncode == 0 and not home.has_marker("s-one", "archived.json"),
-        restored.stderr[:200],
     )
 
     # The Host service beside an older app: it must come up, publish its

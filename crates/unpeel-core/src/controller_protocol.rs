@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const HOST_PROTOCOL_MAJOR: u16 = 1;
-pub const HOST_PROTOCOL_MINOR: u16 = 21;
+pub const HOST_PROTOCOL_MINOR: u16 = 22;
 
 pub const NATIVE_HOST_CAPABILITIES: &[&str] = &[
     "approval.answer",
@@ -31,8 +31,6 @@ pub const NATIVE_HOST_CAPABILITIES: &[&str] = &[
     "project.pin.set",
     "push.register",
     "relay.credentials.recover",
-    "session.archive",
-    "session.archive.list",
     "session.create",
     "session.input.write",
     "session.mark_read",
@@ -47,7 +45,6 @@ pub const NATIVE_HOST_CAPABILITIES: &[&str] = &[
     "session.resize",
     "session.resize_desktop",
     "session.restart",
-    "session.restore",
     "session.runtime.resume",
     "session.stop",
     "session.reload",
@@ -83,8 +80,6 @@ pub const HEADLESS_HOST_CAPABILITIES: &[&str] = &[
     "pairing.invitation",
     "project.organization.set",
     "project.pin.set",
-    "session.archive",
-    "session.archive.list",
     "session.create",
     "session.input.write",
     "session.mark_read",
@@ -98,7 +93,6 @@ pub const HEADLESS_HOST_CAPABILITIES: &[&str] = &[
     "session.resize",
     "session.resize_desktop",
     "session.restart",
-    "session.restore",
     "session.runtime.resume",
     "session.stop",
     "session.reload",

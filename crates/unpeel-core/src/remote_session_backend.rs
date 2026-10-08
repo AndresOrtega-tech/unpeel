@@ -55,8 +55,6 @@ const TITLE_SET_CAPABILITY: &str = "session.title.set";
 const PIN_SET_CAPABILITY: &str = "session.pin.set";
 const NOTIFY_WHEN_DONE_CAPABILITY: &str = "session.notify_when_done.set";
 const PROJECT_SET_CAPABILITY: &str = "session.project.set";
-const ARCHIVE_CAPABILITY: &str = "session.archive";
-const RESTORE_CAPABILITY: &str = "session.restore";
 const STOP_CAPABILITY: &str = "session.stop";
 const REMOVE_CAPABILITY: &str = "session.remove";
 const RESTART_CAPABILITY: &str = "session.restart";
@@ -72,7 +70,6 @@ const WORKSPACE_SETTINGS_CAPABILITY: &str = "settings.workspace.set";
 const APPS_INSTALL_CAPABILITY: &str = "apps.install";
 const APPS_OPEN_CAPABILITY: &str = "apps.open";
 const INTEGRATIONS_INSTALL_CAPABILITY: &str = "integrations.install";
-const ARCHIVE_LIST_CAPABILITY: &str = "session.archive.list";
 const TRANSCRIPT_MARKDOWN_CAPABILITY: &str = "session.transcript.markdown";
 const METRICS_CAPABILITY: &str = "session.metrics.read";
 const PAIRING_INVITATION_CAPABILITY: &str = "pairing.invitation";
@@ -84,8 +81,6 @@ pub const REMOTE_CAPABILITY_MARK_READ: &str = MARK_READ_CAPABILITY;
 pub const REMOTE_CAPABILITY_TITLE_SET: &str = TITLE_SET_CAPABILITY;
 pub const REMOTE_CAPABILITY_PIN_SET: &str = PIN_SET_CAPABILITY;
 pub const REMOTE_CAPABILITY_NOTIFY_WHEN_DONE_SET: &str = NOTIFY_WHEN_DONE_CAPABILITY;
-pub const REMOTE_CAPABILITY_ARCHIVE: &str = ARCHIVE_CAPABILITY;
-pub const REMOTE_CAPABILITY_RESTORE: &str = RESTORE_CAPABILITY;
 pub const REMOTE_CAPABILITY_STOP: &str = STOP_CAPABILITY;
 pub const REMOTE_CAPABILITY_REMOVE: &str = REMOVE_CAPABILITY;
 pub const REMOTE_CAPABILITY_RESTART: &str = RESTART_CAPABILITY;
@@ -101,7 +96,6 @@ pub const REMOTE_CAPABILITY_WORKSPACE_SETTINGS_SET: &str = WORKSPACE_SETTINGS_CA
 pub const REMOTE_CAPABILITY_APPS_INSTALL: &str = APPS_INSTALL_CAPABILITY;
 pub const REMOTE_CAPABILITY_INTEGRATIONS_INSTALL: &str = INTEGRATIONS_INSTALL_CAPABILITY;
 pub const REMOTE_CAPABILITY_APPS_OPEN: &str = APPS_OPEN_CAPABILITY;
-pub const REMOTE_CAPABILITY_ARCHIVE_LIST: &str = ARCHIVE_LIST_CAPABILITY;
 pub const REMOTE_CAPABILITY_TRANSCRIPT_MARKDOWN: &str = TRANSCRIPT_MARKDOWN_CAPABILITY;
 pub const REMOTE_CAPABILITY_METRICS_READ: &str = METRICS_CAPABILITY;
 pub const REMOTE_CAPABILITY_PAIRING_INVITATION: &str = PAIRING_INVITATION_CAPABILITY;
@@ -123,7 +117,6 @@ const WORKSPACE_SETTINGS_PATH: &str = "/mobile/workspace-settings";
 const APPS_INSTALL_PATH: &str = "/mobile/apps/install";
 const INTEGRATIONS_INSTALL_PATH: &str = "/mobile/integrations/install";
 const APPS_OPEN_PATH: &str = "/mobile/apps/open";
-const ARCHIVE_LIST_PATH: &str = "/mobile/archive";
 const TRANSCRIPT_MARKDOWN_PATH: &str = "/mobile/transcript-markdown";
 const METRICS_PATH: &str = "/mobile/metrics";
 const PAIRING_INVITATION_PATH: &str = "/mobile/pairing-invitation";
@@ -201,8 +194,6 @@ pub struct RemoteProjectSummary {
     pub mcp_blocked: bool,
     #[serde(default)]
     pub sort_order: Option<i64>,
-    #[serde(default)]
-    pub archived_session_count: Option<u64>,
     /// Host-owned sidebar sort mode. Optional for protocol-minor/backward
     /// compatibility; absent means the manual/custom order.
     #[serde(default)]
@@ -241,8 +232,10 @@ pub struct RemoteSessionCapabilities {
     #[serde(default)]
     pub resume_agent: bool,
     pub notify_when_done: bool,
+    /// Host resume evidence: Stop leaves a resumable stopped row. Absent on
+    /// older Hosts and false by default.
     #[serde(default)]
-    pub archive: bool,
+    pub resumable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,8 +315,6 @@ pub struct RemoteSessionSummary {
     pub terminal_background_hex: Option<u32>,
     #[serde(default)]
     pub capabilities: Option<RemoteSessionCapabilities>,
-    #[serde(default)]
-    pub archived: bool,
     #[serde(default)]
     pub spinner_color_hex: Option<u32>,
     /// Latest App alert when it is this Session's newest activity. Additive;
@@ -1004,13 +995,6 @@ struct SessionProjectWire<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct SessionArchivedWire<'a> {
-    #[serde(rename = "sessionID")]
-    session_id: &'a str,
-    archived: bool,
-}
-
-#[derive(Debug, Serialize)]
 struct SessionActionWire<'a> {
     #[serde(rename = "sessionID")]
     session_id: &'a str,
@@ -1526,13 +1510,6 @@ pub struct RemoteUploadedAttachment {
 }
 
 #[derive(Debug, Deserialize)]
-struct ArchivedSessionsWire {
-    #[serde(rename = "projectID")]
-    project_id: String,
-    sessions: Vec<RemoteSessionSummary>,
-}
-
-#[derive(Debug, Deserialize)]
 struct TranscriptMarkdownWire {
     #[serde(rename = "sessionID")]
     session_id: String,
@@ -1982,55 +1959,6 @@ impl RemoteSessionBackend {
             &effect_turn,
             OPERATION,
             PROJECT_SET_CAPABILITY,
-            SESSION_ORGANIZATION_PATH,
-            body,
-        )
-    }
-
-    /// File a Session away non-destructively (`session.archive`): the Host
-    /// stops the hosted PTY but keeps the whole session dir.
-    pub fn archive_session(
-        &self,
-        session_id: &str,
-    ) -> Result<RemoteEffectReceipt, RemoteEffectFailure> {
-        const OPERATION: &str = "session archive";
-        let effect_turn = self.inner.begin_effect();
-        effect_preflight(OPERATION, || validate_session_id(session_id))?;
-        let body = encode_effect_body(
-            OPERATION,
-            &SessionArchivedWire {
-                session_id,
-                archived: true,
-            },
-        )?;
-        self.inner.perform_effect(
-            &effect_turn,
-            OPERATION,
-            ARCHIVE_CAPABILITY,
-            SESSION_ORGANIZATION_PATH,
-            body,
-        )
-    }
-
-    /// Restore an archived Session to the sidebar (`session.restore`).
-    pub fn restore_session(
-        &self,
-        session_id: &str,
-    ) -> Result<RemoteEffectReceipt, RemoteEffectFailure> {
-        const OPERATION: &str = "session restore";
-        let effect_turn = self.inner.begin_effect();
-        effect_preflight(OPERATION, || validate_session_id(session_id))?;
-        let body = encode_effect_body(
-            OPERATION,
-            &SessionArchivedWire {
-                session_id,
-                archived: false,
-            },
-        )?;
-        self.inner.perform_effect(
-            &effect_turn,
-            OPERATION,
-            RESTORE_CAPABILITY,
             SESSION_ORGANIZATION_PATH,
             body,
         )
@@ -2979,35 +2907,6 @@ impl RemoteSessionBackend {
             }
         }
         unreachable!("nonempty upload has a final chunk")
-    }
-
-    /// List one project's archived Sessions (`session.archive.list`) — a
-    /// capability-gated, generation-bound read, not an effect.
-    pub fn list_archived_sessions(
-        &self,
-        project_id: &str,
-    ) -> Result<Vec<RemoteSessionSummary>, RemoteSessionBackendError> {
-        const OPERATION: &str = "archived Sessions";
-        validate_project_id(project_id)?;
-        let body = self.inner.perform_read(
-            OPERATION,
-            ARCHIVE_LIST_CAPABILITY,
-            ARCHIVE_LIST_PATH,
-            &[("project_id", project_id.to_owned())],
-        )?;
-        let wire: ArchivedSessionsWire = serde_json::from_slice(&body).map_err(|error| {
-            RemoteSessionBackendError::InvalidResponse {
-                operation: OPERATION,
-                message: error.to_string(),
-            }
-        })?;
-        if wire.project_id != project_id {
-            return Err(RemoteSessionBackendError::InvalidResponse {
-                operation: OPERATION,
-                message: "response project id does not match request".to_owned(),
-            });
-        }
-        Ok(wire.sessions)
     }
 
     /// Read a Session's rendered conversation transcript
@@ -6774,8 +6673,6 @@ mod tests {
         TITLE_SET_CAPABILITY,
         PIN_SET_CAPABILITY,
         NOTIFY_WHEN_DONE_CAPABILITY,
-        ARCHIVE_CAPABILITY,
-        RESTORE_CAPABILITY,
         STOP_CAPABILITY,
         REMOVE_CAPABILITY,
         RESTART_CAPABILITY,
@@ -6878,14 +6775,6 @@ mod tests {
                 json!({ "sessionID": "s1", "notifyWhenDone": true }),
             ),
             (
-                SESSION_ORGANIZATION_PATH,
-                json!({ "sessionID": "s1", "archived": true }),
-            ),
-            (
-                SESSION_ORGANIZATION_PATH,
-                json!({ "sessionID": "s1", "archived": false }),
-            ),
-            (
                 SESSION_ACTION_PATH,
                 json!({ "sessionID": "s1", "action": "stop" }),
             ),
@@ -6950,26 +6839,24 @@ mod tests {
                 .request_id(),
             4
         );
-        assert_eq!(backend.archive_session("s1").unwrap().request_id(), 5);
-        assert_eq!(backend.restore_session("s1").unwrap().request_id(), 6);
-        assert_eq!(backend.stop_session("s1").unwrap().request_id(), 7);
-        assert_eq!(backend.remove_session("s1").unwrap().request_id(), 8);
-        assert_eq!(backend.restart_session("s1").unwrap().request_id(), 9);
-        assert_eq!(backend.restart_agent("s1").unwrap().request_id(), 10);
-        assert_eq!(backend.resume_agent("s1").unwrap().request_id(), 11);
+        assert_eq!(backend.stop_session("s1").unwrap().request_id(), 5);
+        assert_eq!(backend.remove_session("s1").unwrap().request_id(), 6);
+        assert_eq!(backend.restart_session("s1").unwrap().request_id(), 7);
+        assert_eq!(backend.restart_agent("s1").unwrap().request_id(), 8);
+        assert_eq!(backend.resume_agent("s1").unwrap().request_id(), 9);
         assert_eq!(
             backend
                 .set_session_order("p1", &order)
                 .unwrap()
                 .request_id(),
-            12
+            10
         );
         assert_eq!(
             backend
                 .set_project_organization("p1", &RemoteProjectOrganizationPatch::sort_order(2))
                 .unwrap()
                 .request_id(),
-            13
+            11
         );
         assert_eq!(
             backend
@@ -6985,7 +6872,7 @@ mod tests {
                 )
                 .unwrap()
                 .request_id(),
-            14
+            12
         );
         assert_eq!(connection.remaining(), 0);
         assert!(connection
@@ -7028,14 +6915,6 @@ mod tests {
                     .unwrap_err(),
                 NOTIFY_WHEN_DONE_CAPABILITY,
             ),
-            (
-                backend.archive_session("s1").unwrap_err(),
-                ARCHIVE_CAPABILITY,
-            ),
-            (
-                backend.restore_session("s1").unwrap_err(),
-                RESTORE_CAPABILITY,
-            ),
             (backend.stop_session("s1").unwrap_err(), STOP_CAPABILITY),
             (backend.remove_session("s1").unwrap_err(), REMOVE_CAPABILITY),
             (
@@ -7073,11 +6952,6 @@ mod tests {
                     if capability == expected
             ));
         }
-        assert!(matches!(
-            backend.list_archived_sessions("p1").unwrap_err(),
-            RemoteSessionBackendError::MissingCapability(capability)
-                if capability == ARCHIVE_LIST_CAPABILITY
-        ));
         assert!(matches!(
             backend.read_transcript_markdown("s1", None).unwrap_err(),
             RemoteSessionBackendError::MissingCapability(capability)
@@ -7142,8 +7016,6 @@ mod tests {
                 .unwrap_err(),
             backend.set_session_title("../escape", "ok").unwrap_err(),
             backend.set_session_pinned("bad/id", true).unwrap_err(),
-            backend.archive_session("").unwrap_err(),
-            backend.restore_session("").unwrap_err(),
             backend.stop_session("bad\\id").unwrap_err(),
             backend.remove_session("..").unwrap_err(),
             backend.restart_session("\0").unwrap_err(),
@@ -7200,10 +7072,6 @@ mod tests {
         ] {
             assert_eq!(failure.kind(), RemoteEffectFailureKind::NotApplied);
         }
-        assert!(matches!(
-            backend.list_archived_sessions("../escape").unwrap_err(),
-            RemoteSessionBackendError::InvalidProjectId
-        ));
         assert!(matches!(
             backend
                 .read_transcript_markdown("bad/id", None)
@@ -7398,89 +7266,6 @@ mod tests {
             );
             assert_eq!(connection.remaining(), 0);
         }
-    }
-
-    #[test]
-    fn archived_sessions_read_is_generation_bound_and_typed() {
-        let connection = ScriptedConnection::new();
-        let generation = connection.generation(1);
-        add_bootstrap(
-            &connection,
-            generation,
-            bootstrap_json(
-                Some("host-1"),
-                HOST_PROTOCOL_MAJOR,
-                Some(&[BOOTSTRAP_CAPABILITY, ARCHIVE_LIST_CAPABILITY]),
-            ),
-        );
-        connection.push(reply_step(
-            expected_read(
-                generation,
-                ARCHIVE_LIST_PATH,
-                vec![("project_id".to_owned(), "p1".to_owned())],
-            ),
-            generation,
-            200,
-            serde_json::to_vec(&json!({
-                "projectID": "p1",
-                "sessions": [{
-                    "id": "old-1",
-                    "projectID": "p1",
-                    "title": "Filed",
-                    "command": "claude",
-                    "createdAtUnixMs": 1,
-                    "status": "exited",
-                    "activity": "idle",
-                    "archived": true,
-                }],
-            }))
-            .unwrap(),
-        ));
-        connection.push(reply_step(
-            expected_read(
-                generation,
-                ARCHIVE_LIST_PATH,
-                vec![("project_id".to_owned(), "p1".to_owned())],
-            ),
-            generation,
-            200,
-            serde_json::to_vec(&json!({ "projectID": "other", "sessions": [] })).unwrap(),
-        ));
-        connection.push(reply_step(
-            expected_read(
-                generation,
-                ARCHIVE_LIST_PATH,
-                vec![("project_id".to_owned(), "p-unknown".to_owned())],
-            ),
-            generation,
-            404,
-            br#"{"error":"unknown project"}"#.to_vec(),
-        ));
-        let backend = RemoteSessionBackend::new(connection.clone());
-        backend.bootstrap().unwrap();
-
-        let archived = backend.list_archived_sessions("p1").unwrap();
-        assert_eq!(archived.len(), 1);
-        assert_eq!(archived[0].id, "old-1");
-        assert!(archived[0].archived);
-        assert_eq!(archived[0].status, RemoteSessionStatus::Exited);
-
-        assert!(matches!(
-            backend.list_archived_sessions("p1").unwrap_err(),
-            RemoteSessionBackendError::InvalidResponse {
-                operation: "archived Sessions",
-                ..
-            }
-        ));
-        assert!(matches!(
-            backend.list_archived_sessions("p-unknown").unwrap_err(),
-            RemoteSessionBackendError::HostStatus { status: 404, .. }
-        ));
-        assert!(
-            !backend.needs_bootstrap(),
-            "a correlated read rejection must keep the generation callable"
-        );
-        assert_eq!(connection.remaining(), 0);
     }
 
     #[test]

@@ -49,21 +49,25 @@ enum TerminalPaneDropPreviewGeometry {
 
 /// Closing is a Session lifecycle action, deliberately distinct from the
 /// presentation-only "Detach Pane" verb. Empty launchers just disappear;
-/// terminals without resumable provider state are disposable, while an agent
-/// conversation is stopped and archived only after confirmation.
+/// terminals without resumable provider state are disposable, while a live
+/// agent conversation is stopped (its row stays, ready to Resume) only after
+/// confirmation. An already-stopped resumable row asks before it is removed.
 enum TerminalPaneCloseAction: Equatable {
     case detachPane
     case removeSession(String)
-    case confirmArchive(String)
+    case confirmStop(String)
+    case confirmRemove(String)
 }
 
 func terminalPaneCloseAction(
     for content: PaneContent,
-    canArchiveSession: Bool
+    canStopSession: Bool,
+    isStoppedResumable: Bool
 ) -> TerminalPaneCloseAction {
     guard let sessionID = content.sessionID else { return .detachPane }
-    return canArchiveSession
-        ? .confirmArchive(sessionID)
+    if canStopSession { return .confirmStop(sessionID) }
+    return isStoppedResumable
+        ? .confirmRemove(sessionID)
         : .removeSession(sessionID)
 }
 
@@ -748,7 +752,7 @@ struct TerminalPaneContainer: View {
     }
 
     private struct PaneConfirmation: Identifiable {
-        enum Action { case archive, remove }
+        enum Action { case stop, remove }
         let action: Action
         let sessionID: String
         let label: String
@@ -869,8 +873,8 @@ struct TerminalPaneContainer: View {
                     onConfirm: {
                         paneConfirmation = nil
                         switch confirmation.action {
-                        case .archive:
-                            store.archiveSession(confirmation.sessionID)
+                        case .stop:
+                            store.confirmStopSession(confirmation.sessionID)
                         case .remove:
                             store.confirmRemoveSession(confirmation.sessionID)
                         }
@@ -880,7 +884,7 @@ struct TerminalPaneContainer: View {
         }
     }
 
-    /// Scrim + centered card over the pane area for the archive/remove
+    /// Scrim + centered card over the pane area for the stop/remove
     /// confirmation. Esc and click-away cancel (same monitor as the sidebar's
     /// inline confirm row).
     private struct PaneConfirmationOverlay: View {
@@ -890,8 +894,8 @@ struct TerminalPaneContainer: View {
 
         private var title: String {
             switch confirmation.action {
-            case .archive:
-                return "Stop and archive session?"
+            case .stop:
+                return "Stop session?"
             case .remove:
                 return confirmation.isLive ? "Remove session?" : "Remove from list?"
             }
@@ -899,15 +903,15 @@ struct TerminalPaneContainer: View {
 
         private var message: String {
             switch confirmation.action {
-            case .archive:
-                return "This stops “\(confirmation.label)” and files it in Unpeel so you can restore and resume later. Screenshots and other session files stay."
+            case .stop:
+                return "This stops “\(confirmation.label)”. It stays in the sidebar so you can resume the conversation later."
             case .remove:
                 return "This only removes “\(confirmation.label)” from Unpeel. It does not delete the agent’s conversation."
             }
         }
 
         private var confirmLabel: String {
-            confirmation.action == .archive ? "Archive" : "Remove"
+            confirmation.action == .stop ? "Stop" : "Remove"
         }
 
         var body: some View {
@@ -1575,7 +1579,7 @@ struct TerminalPaneContainer: View {
 
     /// Ghostty-style ⌘W applies to the focused leaf, including the synthetic
     /// full-size leaf of a solo terminal. A resumable agent gets the same
-    /// non-system confirmation card as the pane menu; confirming archives
+    /// non-system confirmation card as the pane menu; confirming stops
     /// rather than removing the Unpeel session.
     private func closeActivePane() {
         guard let pane = presentedPanes.first(where: {
@@ -1585,7 +1589,10 @@ struct TerminalPaneContainer: View {
         let sessionID = pane.content.sessionID
         let action = terminalPaneCloseAction(
             for: pane.content,
-            canArchiveSession: sessionID.map(store.sessionCanArchive) ?? false
+            canStopSession: sessionID.map(store.sessionCanStop) ?? false,
+            isStoppedResumable: sessionID.map {
+                entry(for: $0)?.isLive == false && store.sessionIsResumable($0)
+            } ?? false
         )
         switch action {
         case .detachPane:
@@ -1598,13 +1605,15 @@ struct TerminalPaneContainer: View {
                 return
             }
             store.confirmRemoveSession(sessionID)
-        case let .confirmArchive(sessionID):
+        case let .confirmStop(sessionID), let .confirmRemove(sessionID):
             guard let entry = entry(for: sessionID) else {
                 detachPane(pane)
                 return
             }
+            let isStop: Bool
+            if case .confirmStop = action { isStop = true } else { isStop = false }
             paneConfirmation = PaneConfirmation(
-                action: .archive,
+                action: isStop ? .stop : .remove,
                 sessionID: sessionID,
                 label: entry.label,
                 isLive: entry.isLive
@@ -1919,21 +1928,19 @@ struct TerminalPaneContainer: View {
 
         menu.addItem(.separator())
 
-        if store.sessionCanArchive(entry.id) {
-            menu.addItem(controller.item(
-                entry.isLive ? "Stop and archive" : "Archive"
-            ) {
-                requestPaneArchive(entry)
+        if store.sessionCanStop(entry.id) {
+            menu.addItem(controller.item("Stop") {
+                requestPaneStop(entry)
             })
         }
         menu.addItem(controller.item(
             entry.isLive ? "Remove session" : "Remove from list"
         ) {
             // For a non-resumable launch this is the pane's counterpart to
-            // the sidebar X: there is nothing to archive, so remove it in
+            // the sidebar X: there is nothing to resume, so remove it in
             // one click even while its terminal is still live. Resumable
             // Sessions keep the destructive confirmation.
-            guard store.sessionCanArchive(entry.id) else {
+            guard store.sessionIsResumable(entry.id) else {
                 store.confirmRemoveSession(entry.id)
                 return
             }
@@ -1961,17 +1968,17 @@ struct TerminalPaneContainer: View {
         return item
     }
 
-    private func requestPaneArchive(_ entry: SessionEntry) {
+    private func requestPaneStop(_ entry: SessionEntry) {
         switch entry.status {
         case .starting, .busy, .attention:
             paneConfirmation = PaneConfirmation(
-                action: .archive,
+                action: .stop,
                 sessionID: entry.id,
                 label: entry.label,
                 isLive: entry.isLive
             )
         case .idle, .exited:
-            store.requestArchiveSession(entry.id)
+            store.requestStopSession(entry.id)
         }
     }
 

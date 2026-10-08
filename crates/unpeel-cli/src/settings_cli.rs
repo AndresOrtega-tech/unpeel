@@ -224,7 +224,7 @@ impl SettingKey {
                     .get("auto_stop_archive_minutes")
                     .and_then(Value::as_u64)
                     .filter(|minutes| AUTO_STOP_MINUTE_OPTIONS.contains(minutes))
-                    .unwrap_or(unpeel_serve::auto_archive::DEFAULT_MINUTES)
+                    .unwrap_or(unpeel_serve::auto_stop::DEFAULT_MINUTES)
                     .into(),
             ),
             Self::SidebarStoppedLimit => Value::Number(

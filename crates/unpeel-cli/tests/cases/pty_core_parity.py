@@ -183,13 +183,15 @@ def body(case):
                removed.stderr[:200])
     case.check("the core releases the removed session", wait_core_sessions(home, 1), str(core_sessions(home)))
 
-    archived = run_cli(home, ["archive", second_id], timeout=45)
+    stopped = run_cli(home, ["stop", second_id], timeout=45)
+    second_output = home.path("app-sessions", second_id, "output.bin")
     case.check(
-        "archive stops a core-hosted session and keeps its dir",
-        archived.returncode == 0
-        and home.has_marker(second_id, "archived.json")
-        and home.manifests().get(second_id, {}).get("state") == "exited",
-        archived.stderr[:200] + str(home.manifests().get(second_id, {}).get("state")),
+        "stop ends a core-hosted session and keeps it as a stopped row",
+        stopped.returncode == 0
+        and home.manifests().get(second_id, {}).get("state") == "exited"
+        and os.path.exists(second_output)
+        and os.path.getsize(second_output) == 0,
+        stopped.stderr[:200] + str(home.manifests().get(second_id, {}).get("state")),
     )
     case.check("the core is empty again", wait_core_sessions(home, 0), str(core_sessions(home)))
 

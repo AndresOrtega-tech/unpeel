@@ -79,6 +79,11 @@ def body(case):
         "project-override.json",
         {"project_id": "group-research", "moved_at": 1_754_450_000_100},
     )
+    # Sessions an older Host archived: a legacy `archived.json` marker beside
+    # an exited manifest. Archive is gone; the Host must turn each into an
+    # ordinary resumable stopped row at startup (marker and scrollback
+    # dropped, identity kept).
+    legacy_archived = ["fixture-archive-old", "fixture-archive-new", "fixture-archive-group"]
     for session_id, label, created_at in [
         ("fixture-archive-old", "older archived session", 1_754_100_000_000),
         ("fixture-archive-new", "newer archived session", 1_754_600_000_000),
@@ -91,6 +96,7 @@ def body(case):
         "title.json",
         {"title": "renamed archived session"},
     )
+    home.seed_resume_data("fixture-archive-new")
     home.session("fixture-archive-group", label="group archived session",
                  project_id="proj-1", created_at=1_754_350_000_000)
     home.marker(
@@ -103,6 +109,14 @@ def body(case):
         "archived.json",
         {"archived_at": 1_754_350_000_200},
     )
+    for session_id in legacy_archived:
+        home.marker(session_id, "output-retention.json", {"version": 1})
+    # A legacy marker beside a still-running manifest is not migrated: the
+    # orphan reaper files it exited first, and a later pass migrates it.
+    home.session("fixture-archive-live", label="live session with a legacy marker",
+                 command="cat", project_id="proj-1",
+                 created_at=int(time.time() * 1000), running=True)
+    home.marker("fixture-archive-live", "archived.json", {"archived_at": 1_754_350_000_300})
     screenshots = home.path("app-sessions", "fixture-1", "artifacts", "browser", "screenshots")
     os.makedirs(screenshots, exist_ok=True)
     screenshot_bytes = b"\x89PNG\r\nheadless-artifact"
@@ -124,6 +138,50 @@ def body(case):
         str(ready or driver.log()),
     )
     driver.read_for(6.0)
+
+    def output_size(session_id):
+        try:
+            return os.path.getsize(home.path("app-sessions", session_id, "output.bin"))
+        except OSError:
+            return None
+
+    migrated = driver.wait_for(
+        lambda: not any(home.has_marker(session_id, "archived.json")
+                        for session_id in legacy_archived),
+        timeout=10,
+    )
+    migrated_manifests = home.manifests()
+    case.check(
+        "sessions an older Host archived come back as stopped rows",
+        bool(migrated)
+        and all(
+            migrated_manifests.get(session_id, {}).get("state") == "exited"
+            and output_size(session_id) == 0
+            and not home.has_marker(session_id, "output-retention.json")
+            for session_id in legacy_archived
+        )
+        and (home.read_marker("fixture-archive-new", "title.json") or {}).get("title")
+        == "renamed archived session"
+        and home.has_marker("fixture-archive-group", "project-override.json"),
+        str({
+            session_id: (
+                home.has_marker(session_id, "archived.json"),
+                migrated_manifests.get(session_id, {}).get("state"),
+                output_size(session_id),
+                home.has_marker(session_id, "output-retention.json"),
+            )
+            for session_id in legacy_archived
+        }),
+    )
+    case.check(
+        "a running session's legacy archive marker is left alone",
+        home.has_marker("fixture-archive-live", "archived.json")
+        and (output_size("fixture-archive-live") or 0) > 0
+        and home.manifests().get("fixture-archive-live", {}).get("state") == "running",
+        str((home.has_marker("fixture-archive-live", "archived.json"),
+             output_size("fixture-archive-live"),
+             home.manifests().get("fixture-archive-live", {}).get("state"))),
+    )
 
     status, _ = mobile_request(port, "/mobile/bootstrap", token)
     case.check("the phone server comes up app-lessly", status == 200, str(status))
@@ -169,7 +227,6 @@ def body(case):
             "artifact.list",
             "artifact.read",
             "artifact.upload.resumable",
-            "session.archive.list",
             "session.create",
             "session.order.set",
             "session.pin.set",
@@ -177,6 +234,8 @@ def body(case):
             "session.title.set",
             "session.transcript.markdown",
         }.issubset(host_capabilities)
+        and not {"session.archive", "session.archive.list", "session.restore"}
+        & host_capabilities
         and "session.runtime.restart" not in host_capabilities
         and "session.notify_when_done.set" not in host_capabilities,
         str(sorted(host_capabilities)),
@@ -540,7 +599,8 @@ def body(case):
     )
 
     # Pin persistence is the first compound effect. A broken shared state
-    # file must fail before either the title marker or archive marker changes.
+    # file must fail before the title marker changes or an older phone's
+    # `archived: true` (its Stop) runs.
     valid_state = home.state()
     malformed_state = dict(valid_state)
     malformed_state["pinned_sessions"] = []
@@ -558,7 +618,7 @@ def body(case):
     archived_after_failure = home.read_marker("fixture-org", "archived.json")
     home.write_state(valid_state)
     case.check(
-        "compound organization preflights pin storage before title/archive",
+        "compound organization preflights pin storage before title/stop",
         failed_status == 500
         and "pin preflight failed" in failed.get("error", "")
         and title_after_failure.get("title") == organized_title
@@ -566,61 +626,41 @@ def body(case):
         str((failed_status, failed, title_after_failure, archived_after_failure)),
     )
     case.check(
-        "bootstrap mirrors recent archived sidebar rows and project-scoped counts",
-        sessions.get("fixture-archive-old", {}).get("archived") is True
-        and sessions.get("fixture-archive-new", {}).get("archived") is True
-        and sessions.get("fixture-archive-group", {}).get("archived") is True
-        and projects.get("proj-1", {}).get("archivedSessionCount") == 2
-        and projects.get("group-research", {}).get("archivedSessionCount") == 1,
+        "migrated sessions publish as ordinary stopped rows, never archived",
+        all(
+            sessions.get(session_id, {}).get("status") == "exited"
+            and sessions.get(session_id, {}).get("archived") is False
+            and sessions.get(session_id, {}).get("capabilities", {}).get("archive") is False
+            for session_id in legacy_archived
+        )
+        and sessions.get("fixture-archive-new", {}).get("title") == "renamed archived session"
+        and sessions.get("fixture-archive-new", {}).get("capabilities", {}).get("restart") is True
+        and sessions.get("fixture-archive-group", {}).get("projectID") == "group-research"
+        and all(session.get("archived") is False for session in sessions.values())
+        and all("archivedSessionCount" not in project for project in projects.values()),
         str({
-            "sessionIDs": sorted(sessions),
+            "migrated": {session_id: sessions.get(session_id) for session_id in legacy_archived},
             "project": projects.get("proj-1"),
             "group": projects.get("group-research"),
         }),
     )
+    case.check(
+        "summaries carry the Host's resume evidence",
+        all("resumable" in session.get("capabilities", {}) for session in sessions.values())
+        and sessions.get("fixture-1", {}).get("capabilities", {}).get("resumable") is True
+        and sessions.get("fixture-archive-new", {}).get("capabilities", {}).get("resumable") is True
+        and sessions.get("fixture-org", {}).get("capabilities", {}).get("resumable") is False,
+        str({session_id: sessions.get(session_id, {}).get("capabilities")
+             for session_id in ("fixture-1", "fixture-archive-new", "fixture-org")}),
+    )
 
-    status, archive = mobile_request(
+    archive_status, archive_body = mobile_request(
         port, "/mobile/archive?project_id=proj-1", token
     )
-    archived_sessions = archive.get("sessions", [])
     case.check(
-        "headless archive lists full summaries newest first",
-        status == 200
-        and archive.get("projectID") == "proj-1"
-        and [item.get("id") for item in archived_sessions]
-        == ["fixture-archive-new", "fixture-archive-old"]
-        and archived_sessions[0].get("title") == "renamed archived session"
-        and all(item.get("projectID") == "proj-1"
-                and item.get("archived") is True
-                and item.get("providerID") == "claude"
-                for item in archived_sessions),
-        str((status, archive)),
-    )
-    status, group_archive = mobile_request(
-        port, "/mobile/archive?project_id=group-research", token
-    )
-    case.check(
-        "archive grouping follows the effective group override",
-        status == 200
-        and [item.get("id") for item in group_archive.get("sessions", [])]
-        == ["fixture-archive-group"]
-        and group_archive["sessions"][0].get("projectID") == "group-research",
-        str((status, group_archive)),
-    )
-    status, empty_archive = mobile_request(
-        port, "/mobile/archive?project_id=proj-empty", token
-    )
-    unknown_status, _ = mobile_request(
-        port, "/mobile/archive?project_id=not-a-project", token
-    )
-    missing_status, _ = mobile_request(port, "/mobile/archive", token)
-    case.check(
-        "archive distinguishes known-empty, unknown, and missing projects",
-        status == 200
-        and empty_archive == {"projectID": "proj-empty", "sessions": []}
-        and unknown_status == 404
-        and missing_status == 400,
-        str((status, empty_archive, unknown_status, missing_status)),
+        "the archive listing is gone",
+        archive_status == 404,
+        str((archive_status, archive_body)),
     )
 
     status, _ = mobile_request(port, "/mobile/bootstrap", "wrong-token")
@@ -1149,55 +1189,64 @@ def body(case):
              replacement_id, removed_state, removed_order)),
     )
 
-    status, _ = mobile_request(port, "/mobile/session-organization", token, method="POST",
-                               body={"sessionID": "fixture-1", "archived": True})
-    case.check(
-        "the phone can archive",
-        status == 200 and home.has_marker("fixture-1", "archived.json"),
-        str(status),
+    # An older phone still sends Archive/Restore as `archived` on the
+    # organization patch. Archive is gone: `true` is that phone's Stop (no
+    # marker), `false` has nothing to undo, and a non-boolean is still a 400.
+    with open(home.path("app-sessions", "fixture-active", "output-retention.json"), "w") as handle:
+        json.dump({"version": 1}, handle)
+    status, legacy_stop = mobile_request(
+        port, "/mobile/session-organization", token, method="POST", timeout=20,
+        body={"sessionID": "fixture-active", "archived": True},
     )
-    archive_after = {}
-
-    def archived_snapshot_contains_fixture():
-        nonlocal archive_after
-        archive_status, archive_after = mobile_request(
-            port, "/mobile/archive?project_id=proj-1", token
-        )
-        return archive_status == 200 and any(
-            item.get("id") == "fixture-1"
-            for item in archive_after.get("sessions", [])
-        )
-
-    published = driver.wait_for(archived_snapshot_contains_fixture, timeout=12)
+    stopped_manifest = home.manifests().get("fixture-active", {})
     case.check(
-        "archive writes publish into the live Controller catalog",
-        bool(published),
-        str(archive_after),
+        "an older phone's archive stops the session without filing it away",
+        status == 200
+        and stopped_manifest.get("state") == "exited"
+        and not home.has_marker("fixture-active", "archived.json")
+        and output_size("fixture-active") == 0
+        and not home.has_marker("fixture-active", "output-retention.json"),
+        str((status, legacy_stop, stopped_manifest.get("state"),
+             home.has_marker("fixture-active", "archived.json"),
+             output_size("fixture-active"))),
     )
-    status, _ = mobile_request(port, "/mobile/session-organization", token, method="POST",
-                               body={"sessionID": "fixture-1", "archived": False})
+    stopped_summary = {}
+
+    def stopped_row_published():
+        nonlocal stopped_summary
+        boot_status, boot_now = mobile_request(port, "/mobile/bootstrap", token)
+        stopped_summary = next(
+            (item for item in boot_now.get("sessions", [])
+             if item.get("id") == "fixture-active"),
+            {},
+        )
+        return (
+            boot_status == 200
+            and stopped_summary.get("status") == "exited"
+            and stopped_summary.get("archived") is False
+        )
+
     case.check(
-        "the phone can restore",
-        status == 200 and not home.has_marker("fixture-1", "archived.json"),
-        str(status),
+        "the stopped session stays in the sidebar as a stopped row",
+        bool(driver.wait_for(stopped_row_published, timeout=12)),
+        str(stopped_summary),
     )
-    archive_after_restore = {}
-
-    def archived_snapshot_drops_fixture():
-        nonlocal archive_after_restore
-        archive_status, archive_after_restore = mobile_request(
-            port, "/mobile/archive?project_id=proj-1", token
-        )
-        return archive_status == 200 and all(
-            item.get("id") != "fixture-1"
-            for item in archive_after_restore.get("sessions", [])
-        )
-
-    restored_published = driver.wait_for(archived_snapshot_drops_fixture, timeout=12)
+    restore_status, _ = mobile_request(
+        port, "/mobile/session-organization", token, method="POST",
+        body={"sessionID": "fixture-active", "archived": False},
+    )
+    bad_archived_status, _ = mobile_request(
+        port, "/mobile/session-organization", token, method="POST",
+        body={"sessionID": "fixture-active", "archived": "yes"},
+    )
     case.check(
-        "restore writes disappear from the live Controller catalog",
-        bool(restored_published),
-        str(archive_after_restore),
+        "an older phone's restore is a harmless no-op",
+        restore_status == 200
+        and bad_archived_status == 400
+        and not home.has_marker("fixture-active", "archived.json")
+        and home.manifests().get("fixture-active", {}).get("state") == "exited",
+        str((restore_status, bad_archived_status,
+             home.manifests().get("fixture-active", {}).get("state"))),
     )
 
     status, _ = mobile_request(port, "/mobile/not-a-route", token)
