@@ -2009,6 +2009,21 @@ pub fn remove_session(session_id: &str) -> Result<(), String> {
     remove_session_unlocked(session_id)
 }
 
+/// Retention's Remove (`unpeel-serve` keep limit): delete a Session only if
+/// it is still stopped under its lifecycle lock, so a concurrent Resume or
+/// Reload always wins over the sweep. `Ok(false)` means it was left alone.
+pub fn remove_stopped_session(session_id: &str) -> Result<bool, String> {
+    let _lifecycle_lock = lock_session_lifecycle(session_id)?;
+    if !load_manifest(session_id)
+        .is_some_and(|manifest| manifest.state == HostedSessionState::Exited)
+    {
+        return Ok(false);
+    }
+    validate_shared_session_reference_files()?;
+    remove_session_unlocked(session_id)?;
+    Ok(true)
+}
+
 /// Caller holds this Session's lifecycle lock. Failure recovery deliberately
 /// bypasses the public preflight: even when an index became unreadable between
 /// spawn and identity transfer, the unreported replacement host must still be

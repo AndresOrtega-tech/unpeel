@@ -185,9 +185,9 @@ Tailwind hues (theme.ts:32-54).
   - tag chip: GlassTag sm — 10px/650, radius 6, bg = tagColor 72% + white 28%, text =
     `--background`
 - Stopping a session keeps its row: it joins the stopped section below the live
-  rows (capped by the "Stopped sessions shown in sidebar" setting, default 5; older
-  stopped rows stay searchable in ⌘K) and offers Resume. There is no archive
-  section or library.
+  rows (capped by the "Stopped sessions to keep" setting, default 5; the Host
+  removes older stopped rows, except pinned and unread ones) and offers
+  Resume. There is no archive section or library.
 - "Worktrees" link row (when worktrees enabled; ProjectItem.svelte:1362-1383, 2087-2141):
   same session-row geometry; branch-split icon @ 0.8 opacity (spinner when any worktree
   busy; 6px `#f59e0b` attention dot top-right), label "Worktrees" 12px/600, count badge

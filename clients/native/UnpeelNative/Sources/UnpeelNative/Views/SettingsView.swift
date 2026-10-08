@@ -572,7 +572,7 @@ private struct HostAdvancedSettingsPanel: View {
                         }
 
                         Picker(
-                            "Stopped sessions shown in sidebar",
+                            "Stopped sessions to keep",
                             selection: Binding(
                                 get: { draftLimit ?? settings.sidebarStoppedLimit },
                                 set: { limit in
@@ -592,9 +592,9 @@ private struct HostAdvancedSettingsPanel: View {
                             title: "Cleanup",
                             description: "Idle sessions on \(scopeName) get the "
                                 + "same treatment as Stop: the row stays, ready "
-                                + "to Resume, and nothing is deleted. The sidebar "
-                                + "limit hides older stopped rows without "
-                                + "removing them; search still finds them."
+                                + "to Resume. Each project keeps its newest "
+                                + "stopped sessions up to the limit; older ones "
+                                + "are removed (pinned and unread ones are kept)."
                         )
                     }
                 } else {
@@ -4489,7 +4489,7 @@ struct AdvancedSettingsPanel: View {
             }
             LabeledContent {
                 Picker(
-                    "Stopped sessions shown in sidebar",
+                    "Stopped sessions to keep",
                     selection: Binding(
                         get: { store.sidebarVisibleSessionLimit },
                         set: { store.setSidebarStoppedLimit($0) }
@@ -4503,14 +4503,14 @@ struct AdvancedSettingsPanel: View {
                 .pickerStyle(.menu)
                 .frame(width: 150)
             } label: {
-                Text("Stopped sessions shown in sidebar")
+                Text("Stopped sessions to keep")
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.foreground)
             }
         } header: {
             SettingsSectionHeader(
                 title: "Cleanup",
-                description: "Sessions that have stayed idle for the selected time are stopped — the same as clicking \"Stop\": the terminal stops and the row stays in the sidebar, where Resume continues the conversation. Sessions that keep working (including loops — any activity resets the clock), or that are pinned, selected, unread, or waiting for input, are left alone; plain shell terminals are never touched. Nothing is deleted automatically. Choose how many stopped sessions each project previews; older rows are hidden from the sidebar only, and search still finds them."
+                description: "Sessions that have stayed idle for the selected time are stopped — the same as clicking \"Stop\": the terminal stops and the row stays in the sidebar, where Resume continues the conversation. Sessions that keep working (including loops — any activity resets the clock), or that are pinned, selected, unread, or waiting for input, are left alone; plain shell terminals are never touched. Each project keeps its newest stopped sessions up to the limit; older ones are removed automatically, except pinned and unread ones. The agent's own history (for example claude --resume) still has those conversations."
             )
         }
     }

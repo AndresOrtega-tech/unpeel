@@ -238,6 +238,10 @@ pub enum SidebarItem {
 pub struct SidebarModel {
     pub rows: Vec<SessionRow>,
     pub items: Vec<SidebarItem>,
+    /// Stopped Sessions past their group's keep limit (`sidebar_stopped_limit`):
+    /// the Host's retention sweep removes them. Pinned and unread rows never
+    /// land here.
+    pub expired: Vec<String>,
 }
 
 /// Everything the Host publishes to authenticated Controller transports on a
@@ -769,9 +773,11 @@ pub fn scan_sidebar(
 
     // Sidebar order mirrors the desktop model: per project, pins come first,
     // then every live row, then stopped rows capped by the desktop's preview
-    // window (Settings ▸ Cleanup, default five). Hidden rows remain in the
-    // model for palette/history access.
+    // window (Settings ▸ Cleanup, default five), which is also the keep
+    // limit: rows past it are `expired` and the Host's retention sweep
+    // removes them.
     let mut items = Vec::new();
+    let mut expired = Vec::new();
     let mut indices: Vec<usize> = (0..rows.len()).collect();
     indices.sort_by(|&a, &b| rows[b].created_at.cmp(&rows[a].created_at));
 
@@ -988,15 +994,21 @@ pub fn scan_sidebar(
                     name: kid_name,
                 });
             }
+            expired.extend(kid.hidden.iter().map(|&i| rows[i].id.clone()));
             items.extend(kid.pinned.into_iter().map(SidebarItem::Session));
             items.extend(kid.sessions.into_iter().map(SidebarItem::Session));
         }
+        expired.extend(listing.hidden.iter().map(|&i| rows[i].id.clone()));
         items.extend(listing.pinned.into_iter().map(SidebarItem::Session));
         items.extend(listing.sessions.into_iter().map(SidebarItem::Session));
     }
 
     items.push(SidebarItem::AddProject);
-    SidebarModel { rows, items }
+    SidebarModel {
+        rows,
+        items,
+        expired,
+    }
 }
 
 /// One group's sidebar rows (a top-level project or a worktree child),
@@ -1005,7 +1017,8 @@ pub fn scan_sidebar(
 struct GroupListing {
     pinned: Vec<usize>,
     sessions: Vec<usize>,
-    hidden_inactive: usize,
+    /// Stopped rows past the keep limit, bound for removal.
+    hidden: Vec<usize>,
 }
 
 impl GroupListing {
@@ -1014,7 +1027,7 @@ impl GroupListing {
     }
     /// Sessions the group lists or files: what a folder row's count shows.
     fn session_count(&self) -> usize {
-        self.pinned.len() + self.sessions.len() + self.hidden_inactive
+        self.pinned.len() + self.sessions.len() + self.hidden.len()
     }
 }
 
@@ -1120,17 +1133,15 @@ fn group_listing(
         stopped.sort_by_key(|&i| order_key(i));
     }
 
-    // The preview window keeps any stopped row the user is looking at or has
-    // not read — desktop parity.
-    let inactive = stopped;
+    // The keep limit also keeps any stopped row the user has not read.
     let mut kept: Vec<usize> = Vec::new();
-    let mut hidden_inactive = 0usize;
-    for (inactive_rank, index) in inactive.iter().copied().enumerate() {
+    let mut hidden: Vec<usize> = Vec::new();
+    for (inactive_rank, index) in stopped.iter().copied().enumerate() {
         let keep = inactive_rank < stopped_window || keep_visible.contains(&rows[index].id);
         if keep {
             kept.push(index);
         } else {
-            hidden_inactive += 1;
+            hidden.push(index);
         }
     }
 
@@ -1141,7 +1152,7 @@ fn group_listing(
     GroupListing {
         pinned,
         sessions,
-        hidden_inactive,
+        hidden,
     }
 }
 
@@ -1362,7 +1373,11 @@ pub fn model_from_bridge(
         add_node(project, &mut rows, &mut items, &children)?;
     }
     items.push(SidebarItem::AddProject);
-    let mut model = SidebarModel { rows, items };
+    let mut model = SidebarModel {
+        rows,
+        items,
+        expired: Vec::new(),
+    };
     apply_shared_order(&mut model);
     Some(model)
 }
@@ -2272,8 +2287,30 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ids, ["live", "stopped-16", "stopped-15"]);
-        assert_eq!(listing.hidden_inactive, 5);
+        assert_eq!(listing.hidden.len(), 5);
         assert_eq!(listing.session_count(), 8);
+
+        // Rows past the keep limit are bound for removal, except unread ones.
+        let unread = std::collections::HashSet::from([rows[1].id.clone()]);
+        let listing = group_listing(
+            "__recent_test_project",
+            &rows,
+            &indices,
+            None,
+            &unread,
+            &std::collections::HashSet::new(),
+            true,
+            2,
+        );
+        let expired = listing
+            .hidden
+            .iter()
+            .map(|index| rows[*index].label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expired,
+            ["stopped-14", "stopped-13", "stopped-12", "stopped-11"]
+        );
     }
 
     #[test]
@@ -2672,7 +2709,11 @@ mod tests {
             },
             SidebarItem::AddProject,
         ];
-        let model = SidebarModel { rows, items };
+        let model = SidebarModel {
+            rows,
+            items,
+            expired: Vec::new(),
+        };
         assert_eq!(display_project_order(&model), vec!["p2", "p2-group", "p1"]);
     }
 
@@ -2707,6 +2748,7 @@ mod tests {
         let model = SidebarModel {
             rows: vec![row.clone()],
             items: vec![SidebarItem::Session(0)],
+            expired: Vec::new(),
         };
         let snapshot = mobile_snapshot(&model, None, &std::collections::HashSet::new(), None);
         let summary = &snapshot.bootstrap["sessions"][0];
@@ -2757,6 +2799,7 @@ mod tests {
         let model = SidebarModel {
             rows: vec![row],
             items: vec![SidebarItem::Session(0)],
+            expired: Vec::new(),
         };
         let snapshot = mobile_snapshot(&model, None, &std::collections::HashSet::new(), None);
         let summary = &snapshot.bootstrap["sessions"][0];
@@ -2785,6 +2828,7 @@ mod tests {
         let model = SidebarModel {
             rows: vec![row],
             items: vec![SidebarItem::Session(0)],
+            expired: Vec::new(),
         };
         let directory =
             std::env::temp_dir().join(format!("unpeel-mobile-alert-{}", uuid::Uuid::new_v4()));
@@ -2849,6 +2893,7 @@ mod tests {
                 SidebarItem::Session(2),
                 SidebarItem::Session(3),
             ],
+            expired: Vec::new(),
         };
         let snapshot = mobile_snapshot(&model, None, &std::collections::HashSet::new(), None);
         let sessions = snapshot.bootstrap["sessions"].as_array().unwrap();
@@ -2881,6 +2926,7 @@ mod tests {
                 SidebarItem::Session(1),
                 SidebarItem::Session(2),
             ],
+            expired: Vec::new(),
         };
         let snapshot = mobile_snapshot(&model, None, &std::collections::HashSet::new(), None);
         let sessions = snapshot.bootstrap["sessions"].as_array().unwrap();

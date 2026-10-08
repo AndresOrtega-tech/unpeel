@@ -261,6 +261,19 @@ organization patch runs Stop and `archived: false` is a no-op, and summaries
 pin `archived`/`capabilities.archive` to false while `capabilities.resumable`
 carries the resume evidence.
 
+### Stopped-Session retention (keep limit)
+
+`sweep_retention` (`retention.rs`) runs after the auto-stop sweep on every
+rescan. The sidebar's stopped window (`sidebar_stopped_limit`, "Stopped
+sessions to keep", default 5 per group, 0 = none) is the keep limit:
+`scan_sidebar` lists the stopped rows past it in `SidebarModel.expired`
+(never pinned or unread rows), and the sweep removes them one batch at a
+time through `session_ops::remove_stopped_session`, which re-checks under
+the Session's lifecycle lock that it is still stopped, so a concurrent
+Resume or Reload wins. A failed removal backs off for a minute and is
+reported as a worker warning; each removal is traced (`host-worker removed
+stopped session <id> past the keep limit`).
+
 ### Browser engine install (`serve.json.browserEngine`)
 
 At start the worker spawns one `browser-engine-install` thread that runs

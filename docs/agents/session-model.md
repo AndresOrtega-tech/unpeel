@@ -155,13 +155,15 @@ termination output is drained first. Never signal an unverified process group.
 The sidebar and both palettes use one lifecycle rank: working sessions
 (starting/busy) lead, then latest shared lifecycle timestamp. The sidebar
 adds its persistent filing structure around that rank: all live rows first,
-then a preview of the most recent stopped rows. The inactive preview is a
-user-set window
-(`sidebar_stopped_limit` remains the compatibility key in `app-state.json`,
-default 5, shared by the app's Settings ▸ Advanced ▸ Cleanup and, before its
-2026-09-03 removal, the TUI's Settings ▸ Cleanup). Past the preview a stopped
-Session is hidden from the sidebar only and remains available through
-search/history until the user resumes, removes, or pins it. Reading/marking a Session does not move it. Everything is derived
+then the most recent stopped rows. That window is also the **keep limit**
+("Stopped sessions to keep", Settings ▸ Advanced ▸ Cleanup;
+`sidebar_stopped_limit` remains the compatibility key in `app-state.json`,
+default 5 per group, 0 = none): the Host's retention sweep
+(`unpeel-serve/src/retention.rs`) removes stopped Sessions past it, never
+pinned or unread ones, re-checking under the lifecycle lock that each is
+still stopped (`session_ops::remove_stopped_session`) so a Resume wins. The
+sidebar is therefore the whole list; the provider's own history still holds
+removed conversations. Reading/marking a Session does not move it. Everything is derived
 from shared Host artifacts and `updatedAtUnixMs` is published to Controllers,
 so local, headless, and remote views do not invent their own recency from
 Controller-local files. The Rust helpers are
@@ -191,8 +193,8 @@ start migrates legacy `archived.json` Sessions to plain stopped rows
 
 **Sidebar model (`sidebarLists` in `UnpeelStore`):** each project's list is
 pins, then ACTIVE (live) subtree blocks — never truncated — then stopped
-blocks capped at `sidebarVisibleSessionLimit`; the default is 5. Selected,
-unread, keep-visible, and in-flight inactive blocks always stay past the cap.
+blocks capped at `sidebarVisibleSessionLimit` (the keep limit above); the
+default is 5. Unread stopped rows stay past the cap and are never removed.
 "Recently updated" applies the shared lifecycle rank inside the live and
 stopped sections; the final exited manifest timestamp makes a newly stopped
 row recent. The phone mirrors the model from the same Host snapshot.

@@ -625,6 +625,8 @@ pub struct HostRuntime {
     unread_ids: HashSet<String>,
     /// Host-owned auto-stop sweep (`auto_stop.rs`).
     auto_stop: crate::auto_stop::Sweeper,
+    /// Removes stopped Sessions past the keep limit (`retention.rs`).
+    retention: crate::retention::Retention,
     /// Last Host-wide sweep of abandoned resumable uploads.
     last_upload_sweep: Option<Instant>,
     last_activity_state_signature: Option<crate::activity_snapshot::ActivityStateSignature>,
@@ -772,6 +774,7 @@ impl HostRuntime {
             pty_core,
             pty_core_status: None,
             auto_stop: crate::auto_stop::Sweeper::default(),
+            retention: crate::retention::Retention::default(),
             last_upload_sweep: None,
             browser_engine_rx: if browser_engine_install_enabled() {
                 Some(spawn_browser_engine_install(&home))
@@ -912,6 +915,7 @@ impl HostRuntime {
             self.last_scan = Instant::now();
             self.reconcile_direct(&mut emitted);
             self.sweep_auto_stop(&mut emitted);
+            self.sweep_retention(&mut emitted);
             self.sweep_incomplete_uploads();
         }
         self.reconcile_link(&mut emitted);
@@ -1057,6 +1061,26 @@ impl HostRuntime {
                         "host-worker",
                         &format!("auto-stop skips {session_id}: {reason}"),
                     );
+                }
+            }
+        }
+    }
+
+    /// Once per rescan: remove stopped Sessions past their group's keep limit.
+    fn sweep_retention(&mut self, emitted: &mut Vec<ServeEvent>) {
+        for event in self.retention.step(&self.model.expired, now_ms()) {
+            match event {
+                crate::retention::RetentionEvent::Removed(session_id) => {
+                    crate::tracelog::trace(
+                        "host-worker",
+                        &format!("removed stopped session {session_id} past the keep limit"),
+                    );
+                    self.status_dirty = true;
+                }
+                crate::retention::RetentionEvent::Failed { session_id, error } => {
+                    emitted.push(ServeEvent::Warning(format!(
+                        "removing stopped session {session_id} failed: {error}"
+                    )));
                 }
             }
         }
