@@ -822,6 +822,112 @@ final class RemoteHostRuntimeTests: XCTestCase {
         runtime.disconnect()
     }
 
+    /// A workspace with no running PTY core boots a per-process Session Host,
+    /// whose first manifest can trail many state-bus-triggered bootstraps. The
+    /// starting row must stay listed and selected for the whole boot instead
+    /// of vanishing after a fixed number of refreshes.
+    func testExplicitCreateKeepsStartingRowAcrossManyRacingBootstraps() async throws {
+        let optimistic = makeSession(id: "created-session")
+        let backend = ControlledRemoteBackend(createdSessionSummary: optimistic)
+        let runtime = makeRuntime(
+            backend: backend,
+            refreshIntervalNanoseconds: 1_000_000
+        )
+        let capabilities = [
+            "host.bootstrap",
+            "session.input.write",
+            "session.mark_read",
+            "session.output.read",
+            RemoteHostRuntime.HostOperation.create,
+        ]
+        runtime.connectLocalService(
+            home: "/Users/me/.unpeel/workspaces/side",
+            name: "Side",
+            expectedHostID: "local-host"
+        )
+        await waitUntil { await backend.bootstrapCount == 1 }
+        await backend.resolveBootstrap(.success(makeSnapshot(
+            hostID: "local-host",
+            capabilities: capabilities,
+            sessions: [makeSession(id: "current")]
+        )))
+        await waitUntil { runtime.connectionState == .connected(name: "Host") }
+
+        _ = try await runtime.createSession(projectID: "project", presetID: "preset")
+        XCTAssertEqual(runtime.selectedSessionID, "created-session")
+
+        for round in 2...13 {
+            await waitUntil { await backend.bootstrapCount >= round }
+            await backend.resolveBootstrap(.success(makeSnapshot(
+                hostID: "local-host",
+                capabilities: capabilities,
+                sessions: [makeSession(id: "current")]
+            )))
+        }
+        await waitUntil { await backend.bootstrapCount >= 14 }
+        XCTAssertEqual(runtime.selectedSessionID, "created-session")
+        XCTAssertEqual(runtime.snapshot?.sessions.first?.id, "created-session")
+
+        await backend.resolveBootstrap(.success(makeSnapshot(
+            hostID: "local-host",
+            capabilities: capabilities,
+            sessions: [
+                makeSession(id: "created-session"),
+                makeSession(id: "current"),
+            ]
+        )))
+        await waitUntil { await backend.bootstrapCount >= 15 }
+        XCTAssertEqual(runtime.selectedSessionID, "created-session")
+        XCTAssertEqual(
+            runtime.snapshot?.sessions.filter { $0.id == "created-session" }.count,
+            1
+        )
+        runtime.disconnect()
+    }
+
+    /// The synthetic row is still bounded: a Host that never corroborates the
+    /// create must not keep a phantom Session in the sidebar forever.
+    func testUncorroboratedStartingRowExpires() async throws {
+        let optimistic = makeSession(id: "created-session")
+        let backend = ControlledRemoteBackend(createdSessionSummary: optimistic)
+        let runtime = makeRuntime(
+            backend: backend,
+            refreshIntervalNanoseconds: 1_000_000,
+            optimisticCreatedSessionLifetime: .zero
+        )
+        let capabilities = [
+            "host.bootstrap",
+            "session.input.write",
+            "session.mark_read",
+            "session.output.read",
+            RemoteHostRuntime.HostOperation.create,
+        ]
+        runtime.connectLocalService(
+            home: "/Users/me/.unpeel/workspaces/side",
+            name: "Side",
+            expectedHostID: "local-host"
+        )
+        await waitUntil { await backend.bootstrapCount == 1 }
+        await backend.resolveBootstrap(.success(makeSnapshot(
+            hostID: "local-host",
+            capabilities: capabilities,
+            sessions: [makeSession(id: "current")]
+        )))
+        await waitUntil { runtime.connectionState == .connected(name: "Host") }
+
+        _ = try await runtime.createSession(projectID: "project", presetID: "preset")
+        await waitUntil { await backend.bootstrapCount >= 2 }
+        await backend.resolveBootstrap(.success(makeSnapshot(
+            hostID: "local-host",
+            capabilities: capabilities,
+            sessions: [makeSession(id: "current")]
+        )))
+        await waitUntil {
+            runtime.snapshot?.sessions.contains(where: { $0.id == "created-session" }) == false
+        }
+        runtime.disconnect()
+    }
+
     func testBackgroundCreatePublishesOptimisticRowWithoutChangingSelection() async throws {
         let optimistic = makeSession(id: "created-session")
         let backend = ControlledRemoteBackend(createdSessionSummary: optimistic)
@@ -2891,6 +2997,7 @@ final class RemoteHostRuntimeTests: XCTestCase {
         refreshIntervalNanoseconds: UInt64 = 60_000_000_000,
         initialBootstrapRetryIntervalNanoseconds: UInt64 = 1_000_000,
         initialBootstrapFastRetryCount: Int = 3,
+        optimisticCreatedSessionLifetime: Duration = .seconds(30),
         paneCache: RemoteGhosttyPaneCache = RemoteGhosttyPaneCache(),
         paneAttachmentProbe: @escaping RemoteHostRuntime.PaneAttachmentProbe = { _ in true },
         paneOutputFeeder: @escaping RemoteHostRuntime.PaneOutputFeeder = {
@@ -2902,6 +3009,7 @@ final class RemoteHostRuntimeTests: XCTestCase {
             initialBootstrapRetryIntervalNanoseconds:
                 initialBootstrapRetryIntervalNanoseconds,
             initialBootstrapFastRetryCount: initialBootstrapFastRetryCount,
+            optimisticCreatedSessionLifetime: optimisticCreatedSessionLifetime,
             backendFactory: { _ in backend },
             paneCache: paneCache,
             paneAttachmentProbe: paneAttachmentProbe,
@@ -2916,6 +3024,7 @@ final class RemoteHostRuntimeTests: XCTestCase {
         initialDirectLinkGraceNanoseconds: UInt64 = 60_000_000_000,
         directProbeSuccessfulLinkRefreshes: Int = 8,
         forceLinkForDevelopment: Bool = false,
+        optimisticCreatedSessionLifetime: Duration = .seconds(30),
         backendFactory: @escaping RemoteHostRuntime.BackendFactory,
         paneCache: RemoteGhosttyPaneCache = RemoteGhosttyPaneCache(),
         paneAttachmentProbe: @escaping RemoteHostRuntime.PaneAttachmentProbe = { _ in true },
@@ -2935,6 +3044,7 @@ final class RemoteHostRuntimeTests: XCTestCase {
             resizeDebounceNanoseconds: 1_000_000,
             fitSettleNanoseconds: 0,
             fitClearDelayNanoseconds: 0,
+            optimisticCreatedSessionLifetime: optimisticCreatedSessionLifetime,
             backendFactory: backendFactory,
             paneCache: paneCache,
             paneAttachmentProbe: paneAttachmentProbe,

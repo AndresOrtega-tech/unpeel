@@ -566,10 +566,14 @@ final class RemoteHostRuntime: ObservableObject {
     private var pendingCreatedSelectionID: String?
     /// Correlated create receipts can carry a complete starting row before the
     /// detached Session Host has published its first manifest. Retain that row
-    /// across a few racing bootstraps so creation feels local and never flashes
-    /// back to the previous selection.
+    /// (and its selection) until Host truth lists it, so creation feels local
+    /// and never flashes back to the previous selection. The bound is time,
+    /// not a bootstrap count: every state-bus ping triggers a bootstrap, and a
+    /// workspace with no running PTY core boots a per-process Host whose first
+    /// manifest can trail many of them.
     private var pendingOptimisticCreatedSession:
-        (summary: RemoteSessionSummary, observationsRemaining: Int)?
+        (summary: RemoteSessionSummary, expiresAt: ContinuousClock.Instant)?
+    private let optimisticCreatedSessionLifetime: Duration
     private var directDataPlaneSelectionSequence: UInt64 = 0
     /// Restore & Resume mints a new Session id but the legacy success receipt
     /// carries only `{ok:true}`. Correlate the replacement against a snapshot
@@ -637,6 +641,7 @@ final class RemoteHostRuntime: ObservableObject {
         resizeDebounceNanoseconds: UInt64 = 80_000_000,
         fitSettleNanoseconds: UInt64 = 300_000_000,
         fitClearDelayNanoseconds: UInt64 = 20_000_000_000,
+        optimisticCreatedSessionLifetime: Duration = .seconds(30),
         backendFactory: @escaping BackendFactory = { transport in
             switch transport {
             case let .ssh(target, expectedHostID, mode, secret):
@@ -693,6 +698,7 @@ final class RemoteHostRuntime: ObservableObject {
         self.resizeDebounceNanoseconds = resizeDebounceNanoseconds
         fitSettleInterval = Double(fitSettleNanoseconds) / 1_000_000_000
         self.fitClearDelayNanoseconds = fitClearDelayNanoseconds
+        self.optimisticCreatedSessionLifetime = optimisticCreatedSessionLifetime
         self.backendFactory = backendFactory
         self.paneCache = paneCache
         self.paneAttachmentProbe = paneAttachmentProbe
@@ -2027,14 +2033,12 @@ final class RemoteHostRuntime: ObservableObject {
 
     private func adopt(_ incoming: RemoteBootstrapSnapshot) {
         var next = incoming
-        if var optimistic = pendingOptimisticCreatedSession {
+        if let optimistic = pendingOptimisticCreatedSession {
             if incoming.sessions.contains(where: { $0.id == optimistic.summary.id }) {
                 // Host truth has caught up; the ordinary pending-selection path
                 // below consumes the intent and replaces the starting summary.
                 pendingOptimisticCreatedSession = nil
-            } else if optimistic.observationsRemaining > 0 {
-                optimistic.observationsRemaining -= 1
-                pendingOptimisticCreatedSession = optimistic
+            } else if ContinuousClock.now < optimistic.expiresAt {
                 next = Self.snapshot(next, prepending: optimistic.summary)
             } else {
                 // A correlated create should publish promptly, but never retain
@@ -3986,7 +3990,7 @@ extension RemoteHostRuntime {
            let snapshot {
             pendingOptimisticCreatedSession = (
                 summary: optimistic,
-                observationsRemaining: 8
+                expiresAt: ContinuousClock.now + optimisticCreatedSessionLifetime
             )
             adopt(snapshot)
         } else if selectOnCreate,
