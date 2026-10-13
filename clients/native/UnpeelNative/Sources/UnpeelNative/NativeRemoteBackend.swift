@@ -201,6 +201,8 @@ protocol NativeRemoteBackendProtocol: Sendable {
     func setPreset(patch: RemotePresetPatch) async throws -> NativeRemoteEffectReceipt
     func setWorkspaceSettings(patch: RemoteWorkspaceSettingsPatch) async throws -> NativeRemoteEffectReceipt
     func pluginUpdates() async throws -> RemotePluginUpdates
+    func gitSettings() async throws -> RemoteGitSettings
+    func setGitSettings(_ action: RemoteGitSettingsAction) async throws -> NativeRemoteEffectReceipt
     func setOpener(selector: String, opener: String) async throws -> NativeRemoteEffectReceipt
     func installApp(appID: String) async throws -> NativeRemoteEffectReceipt
     func installIntegration(runtimeID: String) async throws -> NativeRemoteEffectReceipt
@@ -233,6 +235,16 @@ protocol NativeRemoteBackendProtocol: Sendable {
 }
 
 extension NativeRemoteBackendProtocol {
+    func gitSettings() async throws -> RemoteGitSettings {
+        throw NativeRemoteBackendError(result: Int32(UNPEEL_NATIVE_BRIDGE_ERROR_REMOTE),
+            code: "git_settings_unavailable", message: "Update Unpeel on this Host to use Git settings.")
+    }
+
+    func setGitSettings(_ action: RemoteGitSettingsAction) async throws -> NativeRemoteEffectReceipt {
+        throw NativeRemoteBackendError(result: Int32(UNPEEL_NATIVE_BRIDGE_ERROR_REMOTE),
+            code: "git_settings_unavailable", message: "Update Unpeel on this Host to use Git settings.",
+            kind: "notApplied", operation: "Git settings")
+    }
     func setOpener(
         selector: String,
         opener: String
@@ -1878,6 +1890,37 @@ final class NativeRemoteBackend: @unchecked Sendable {
                     message: "The Host returned an invalid transcript response."
                 )
             }
+        }
+    }
+
+    func gitSettings() async throws -> RemoteGitSettings {
+        let handle = try currentIdentityValidatedHandle()
+        return try await Self.runBlocking(priority: .utility) {
+            try Task.checkCancellation()
+            var pointer: UnsafeMutablePointer<UInt8>?
+            var length = 0
+            let result = unpeel_native_bridge_remote_git_settings(handle, &pointer, &length)
+            let output = Self.takeOutput(pointer, length: length)
+            guard result == UNPEEL_NATIVE_BRIDGE_OK else {
+                throw Self.bridgeError(result: result, output: output,
+                    fallbackCode: "git_settings_failed", fallbackMessage: "Could not read Git settings.")
+            }
+            return try JSONDecoder().decode(RemoteGitSettings.self, from: output)
+        }
+    }
+
+    func setGitSettings(_ action: RemoteGitSettingsAction) async throws -> NativeRemoteEffectReceipt {
+        let handle = try currentIdentityValidatedHandle()
+        let body = try JSONEncoder().encode(action)
+        return try await Self.runBlocking(priority: .userInitiated) {
+            try Task.checkCancellation()
+            var pointer: UnsafeMutablePointer<UInt8>?
+            var length = 0
+            let result = body.withUnsafeBytes { bytes in
+                unpeel_native_bridge_remote_git_settings_set(handle,
+                    bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, &pointer, &length)
+            }
+            return try Self.decodeEffect(result: result, pointer: pointer, length: length, operation: "Git settings")
         }
     }
 

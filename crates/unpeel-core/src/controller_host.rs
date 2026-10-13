@@ -184,6 +184,8 @@ impl ControllerHostRuntime {
             }
             ("POST", "/mobile/workspace-settings") => workspace_settings_response(&request.body),
             ("GET", "/mobile/plugin-updates") => (200, crate::plugin_updates::request()),
+            ("GET", "/mobile/git-settings") => (200, crate::git_settings::read()),
+            ("POST", "/mobile/git-settings") => crate::git_settings::write(&request.body),
             ("POST", "/mobile/openers") => opener_response(&request.body),
             ("POST", "/mobile/apps/install") => app_install_response(&request.body),
             ("POST", "/mobile/integrations/install") => integration_install_response(&request.body),

@@ -49,6 +49,8 @@ Quick preset selection rules (`Presets.swift`):
 
 ### Agents and Plugins
 
+GitHub sign-in and Git identity live in Settings → Git; see [Git settings](git-settings.md).
+
 `PluginSettingsPanel` is one list implementation with two scopes: Settings ▸
 **Agents** (agent CLIs and custom commands) and Settings ▸ **Plugins** (Unpeel
 Apps under their user-facing name). Both combine installation, activation, and

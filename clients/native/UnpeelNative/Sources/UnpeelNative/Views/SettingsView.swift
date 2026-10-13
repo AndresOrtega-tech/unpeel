@@ -52,6 +52,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     case agents
     /// Unpeel Apps under their user-facing name.
     case plugins
+    case git
     /// What agents may do through Unpeel's tools (the Sessions and Browser
     /// domain policies on one page).
     case agentAccess
@@ -121,7 +122,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     /// `settings.presets.set` is the first.
     static var hostScopedCases: [SettingsTab] {
         [
-            .agents, .plugins, .agentAccess, .presets, .appearance, .transcripts,
+            .agents, .plugins, .git, .agentAccess, .presets, .appearance, .transcripts,
             .notifications, .computer, .features, .advanced,
         ]
     }
@@ -131,6 +132,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .appearance: return "Appearance"
         case .agents: return "Agents"
         case .plugins: return "Plugins"
+        case .git: return "Git"
         case .agentAccess: return "Agent access"
         case .presets: return "Agents"
         case .mobile: return "Remote Control"
@@ -151,6 +153,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .appearance: return .settingsAppearance
         case .agents: return .settingsAgents
         case .plugins: return .settingsPlugins
+        case .git: return .settingsGit
         case .agentAccess: return .settingsAgentAccess
         case .presets: return .settingsPresets
         case .mobile: return .settingsRemote
@@ -2092,6 +2095,9 @@ struct SettingsContentHost: View {
             } else if selectedTab == .plugins {
                 PluginSettingsPanel(store: store, runtime: store.remoteHostRuntime, scope: .plugins)
                     .id(store.selectedHostScope.paneScopeID)
+            } else if selectedTab == .git {
+                GitSettingsPanel(store: store, runtime: store.remoteHostRuntime)
+                    .id(store.selectedHostScope.paneScopeID)
             } else if selectedTab == .mobile {
                 // Pairing follows the scope (one pairing = one workspace);
                 // the panel itself branches on the selected scope kind.
@@ -2193,6 +2199,9 @@ struct SettingsContentHost: View {
                 .id(store.selectedHostScope.paneScopeID)
         case .plugins:
             PluginSettingsPanel(store: store, runtime: store.remoteHostRuntime, scope: .plugins)
+                .id(store.selectedHostScope.paneScopeID)
+        case .git:
+            GitSettingsPanel(store: store, runtime: store.remoteHostRuntime)
                 .id(store.selectedHostScope.paneScopeID)
         case .transcripts:
             TranscriptsSettingsPanel(store: store)

@@ -188,6 +188,21 @@ impl RegisteredRemoteOutputPage for RegisteredCoreOutputPage {
 /// the C-boundary tests exercise ownership and panic containment without
 /// launching a real SSH daemon.
 trait RegisteredRemoteBackend: Send + Sync {
+    fn read_git_settings(&self) -> Result<serde_json::Value, NativeRemoteError> {
+        Err(NativeRemoteError::remote(
+            "git_settings_unavailable",
+            "Git settings are unavailable on this Host",
+        ))
+    }
+    fn set_git_settings(&self, _body: &serde_json::Value) -> Result<u64, NativeRemoteEffectError> {
+        Err(NativeRemoteEffectError {
+            result: ERROR_REMOTE,
+            kind: "notApplied",
+            code: "git_settings_unavailable",
+            operation: "Git settings",
+            message: "Git settings are unavailable on this Host".into(),
+        })
+    }
     fn read_plugin_updates(&self) -> Result<serde_json::Value, NativeRemoteError> {
         Err(NativeRemoteError::remote(
             "plugin_updates_unavailable",
@@ -492,6 +507,17 @@ struct RegisteredCoreBackend {
 }
 
 impl RegisteredRemoteBackend for RegisteredCoreBackend {
+    fn read_git_settings(&self) -> Result<serde_json::Value, NativeRemoteError> {
+        self.backend
+            .read_git_settings()
+            .map_err(|error| native_remote_backend_error("Git settings", error))
+    }
+    fn set_git_settings(&self, body: &serde_json::Value) -> Result<u64, NativeRemoteEffectError> {
+        self.backend
+            .set_git_settings(body)
+            .map(|receipt| receipt.request_id())
+            .map_err(native_remote_effect_error)
+    }
     fn read_plugin_updates(&self) -> Result<serde_json::Value, NativeRemoteError> {
         self.backend
             .read_plugin_updates()
@@ -4508,6 +4534,46 @@ pub unsafe extern "C" fn unpeel_native_bridge_remote_opener_set(
     finish_remote_effect_ffi(outcome, "resource opener", out_pointer, out_length)
 }
 
+/// Change Git settings on the selected Host (`settings.git.set`).
+///
+/// # Safety
+///
+/// A non-empty body must point to readable bytes of its declared length.
+/// Both output pointers must be non-null and writable.
+#[no_mangle]
+pub unsafe extern "C" fn unpeel_native_bridge_remote_git_settings_set(
+    handle: RemoteHandle,
+    body_json_pointer: *const u8,
+    body_json_length: usize,
+    out_pointer: *mut *mut u8,
+    out_length: *mut usize,
+) -> i32 {
+    if out_pointer.is_null() || out_length.is_null() {
+        return ERROR_INVALID_INPUT;
+    }
+    *out_pointer = ptr::null_mut();
+    *out_length = 0;
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let body = input_bytes(body_json_pointer, body_json_length).map_err(|message| {
+            native_not_applied_effect_error("Git settings")(NativeRemoteError::invalid_input(
+                "invalid_git_settings_buffer",
+                message,
+            ))
+        })?;
+        let value: serde_json::Value = serde_json::from_slice(body).map_err(|_| {
+            native_not_applied_effect_error("Git settings")(NativeRemoteError::invalid_input(
+                "invalid_git_settings_json",
+                "Invalid Git settings request",
+            ))
+        })?;
+        let request_id = remote_backend(handle)
+            .map_err(native_not_applied_effect_error("Git settings"))?
+            .set_git_settings(&value)?;
+        encode_effect_receipt("Git settings", request_id)
+    }));
+    finish_remote_effect_ffi(outcome, "Git settings", out_pointer, out_length)
+}
+
 /// Install one runtime's Unpeel integration on the remote Host
 /// (`integrations.install`).
 ///
@@ -4962,6 +5028,42 @@ pub unsafe extern "C" fn unpeel_native_bridge_remote_session_metrics(
             "Remote Session id",
         )?;
         read_remote_session_metrics(handle, session_id)
+    }));
+    match outcome {
+        Ok(Ok(bytes)) => {
+            return_bytes(bytes, out_pointer, out_length);
+            RESULT_OK
+        }
+        Ok(Err(error)) => {
+            let result = error.result;
+            return_bytes(encode_remote_error(error), out_pointer, out_length);
+            result
+        }
+        Err(_) => {
+            return_bytes(remote_panic_error(), out_pointer, out_length);
+            ERROR_PANIC
+        }
+    }
+}
+
+/// Read Git metadata and device authorization progress from the selected Host.
+///
+/// # Safety
+/// Both output pointers must be non-null and writable.
+#[no_mangle]
+pub unsafe extern "C" fn unpeel_native_bridge_remote_git_settings(
+    handle: RemoteHandle,
+    out_pointer: *mut *mut u8,
+    out_length: *mut usize,
+) -> i32 {
+    if out_pointer.is_null() || out_length.is_null() {
+        return ERROR_INVALID_INPUT;
+    }
+    *out_pointer = ptr::null_mut();
+    *out_length = 0;
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let updates = remote_backend(handle)?.read_git_settings()?;
+        encode_remote_read("Git settings", &updates)
     }));
     match outcome {
         Ok(Ok(bytes)) => {

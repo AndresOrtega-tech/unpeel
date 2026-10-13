@@ -5,7 +5,9 @@ import Security
 public enum RemoteControlProtocol {
     public static let version = 1
     public static let hostMajorVersion = 1
-    public static let hostMinorVersion = 19
+    public static let hostMinorVersion = 22
+    public static let gitSettingsReadCapability = "settings.git.read"
+    public static let gitSettingsSetCapability = "settings.git.set"
     public static let resumableArtifactUploadCapability = "artifact.upload.resumable"
     public static let sessionOrderCapability = "session.order.set"
     public static let sessionRuntimeRestartCapability = "session.runtime.restart"

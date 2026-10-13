@@ -2,13 +2,22 @@
   "schemaVersion": 1,
   "protocol": {
     "major": 1,
-    "minor": 21,
+    "minor": 22,
     "compatibility": {
       "major": "must-match",
       "minor": "additive",
       "unknownCapabilities": "ignore"
     },
     "history": [
+      {
+        "minor": 22,
+        "release": "0.7.5",
+        "summary": "Host-owned Git identity and GitHub device authorization. Controllers present authorization on their own device; credentials stay in the Host user account.",
+        "capabilities": [
+          "settings.git.read",
+          "settings.git.set"
+        ]
+      },
       {
         "minor": 21,
         "release": "0.7.0",
@@ -443,6 +452,20 @@
       "id": "integrations.install",
       "method": "POST",
       "path": "/mobile/integrations/install",
+      "native": true,
+      "tui": true
+    },
+    {
+      "id": "settings.git.read",
+      "method": "GET",
+      "path": "/mobile/git-settings",
+      "native": true,
+      "tui": true
+    },
+    {
+      "id": "settings.git.set",
+      "method": "POST",
+      "path": "/mobile/git-settings",
       "native": true,
       "tui": true
     }

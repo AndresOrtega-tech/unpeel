@@ -479,6 +479,17 @@ int32_t unpeel_native_bridge_remote_opener_set(
     size_t *out_length
 );
 
+/* Git account metadata and authorization. Credentials never cross this ABI. */
+int32_t unpeel_native_bridge_remote_git_settings(
+    unpeel_native_bridge_remote_handle_t handle,
+    uint8_t **out_pointer, size_t *out_length
+);
+int32_t unpeel_native_bridge_remote_git_settings_set(
+    unpeel_native_bridge_remote_handle_t handle,
+    const uint8_t *body_json_pointer, size_t body_json_length,
+    uint8_t **out_pointer, size_t *out_length
+);
+
 /* Install one runtime's Unpeel integration on the Host (integrations.install). */
 int32_t unpeel_native_bridge_remote_integration_install(
     unpeel_native_bridge_remote_handle_t handle,

@@ -1863,6 +1863,11 @@ fn handle_with_effects(
         ("GET", "/mobile/plugin-updates") => {
             (200, unpeel_core::plugin_updates::request().to_string())
         }
+        ("GET", "/mobile/git-settings") => (200, unpeel_core::git_settings::read().to_string()),
+        ("POST", "/mobile/git-settings") => {
+            let (status, body) = unpeel_core::git_settings::write(&body_json(request));
+            (status, body.to_string())
+        }
         ("POST", "/mobile/openers") => {
             let (status, body) = unpeel_core::controller_host::opener_response(&body_json(request));
             (status, body.to_string())

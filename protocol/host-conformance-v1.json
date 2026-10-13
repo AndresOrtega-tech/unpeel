@@ -1161,6 +1161,58 @@
         "native": 403,
         "tui": 403
       }
+    },
+    {
+      "id": "git-settings.missing-action",
+      "method": "POST",
+      "path": "/mobile/git-settings",
+      "body": {},
+      "expected": {
+        "native": 400,
+        "tui": 400
+      }
+    },
+    {
+      "id": "git-settings.invalid-request-id",
+      "method": "POST",
+      "path": "/mobile/git-settings",
+      "body": {
+        "action": "connectGithub",
+        "requestID": "invalid"
+      },
+      "expected": {
+        "native": 400,
+        "tui": 400
+      }
+    },
+    {
+      "id": "git-settings.invalid-identity",
+      "method": "POST",
+      "path": "/mobile/git-settings",
+      "body": {
+        "action": "setIdentity",
+        "requestID": "23f1c575-b187-4350-8a46-773eb49028b7",
+        "name": "bad\nname",
+        "email": "mail@example.com"
+      },
+      "expected": {
+        "native": 400,
+        "tui": 400
+      }
+    },
+    {
+      "id": "git-settings.invalid-disconnect",
+      "method": "POST",
+      "path": "/mobile/git-settings",
+      "body": {
+        "action": "disconnectGithub",
+        "requestID": "23f1c575-b187-4350-8a46-773eb49028b7",
+        "login": "--all"
+      },
+      "expected": {
+        "native": 400,
+        "tui": 400
+      }
     }
   ],
   "additiveBootstrapFields": [

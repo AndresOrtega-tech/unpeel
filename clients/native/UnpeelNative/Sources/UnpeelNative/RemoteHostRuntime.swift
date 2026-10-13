@@ -3807,6 +3807,22 @@ extension RemoteHostRuntime {
         return updates
     }
 
+    func gitSettings() async throws -> RemoteGitSettings {
+        let (connection, _) = try requireConnection(
+            capability: RemoteControlProtocol.gitSettingsReadCapability, operation: "Git settings")
+        let settings = try await connection.backend.gitSettings()
+        guard isCurrent(connection), connectionBootstrapped else { throw CancellationError() }
+        return settings
+    }
+
+    func setGitSettings(_ action: RemoteGitSettingsAction) async throws {
+        try await performOrganizationVerb(
+            capability: RemoteControlProtocol.gitSettingsSetCapability, operation: "Git settings"
+        ) { backend in
+            _ = try await backend.setGitSettings(action)
+        }
+    }
+
     func setPluginOrder(_ ids: [String]) async throws {
         try await performOrganizationVerb(
             capability: RemoteControlProtocol.pluginsOrderCapability,

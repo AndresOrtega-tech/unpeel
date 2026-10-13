@@ -51,9 +51,14 @@ pub mod first_run;
 #[cfg(feature = "native-host")]
 mod ghostty_vt;
 #[cfg(feature = "native-host")]
+#[path = "../../../runtimes/github/adapter/git_settings.rs"]
+pub mod git_settings;
+#[cfg(feature = "native-host")]
 pub mod hook_assets;
 #[cfg(feature = "native-host")]
 pub mod hook_cancellation;
+#[cfg(feature = "native-host")]
+mod host_command;
 #[cfg(feature = "controller-core")]
 pub mod host_connection;
 #[cfg(feature = "native-host")]

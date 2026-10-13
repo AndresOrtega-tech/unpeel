@@ -20,6 +20,57 @@ final class RemoteHostRuntimeTests: XCTestCase {
         XCTAssertTrue(directOnly?.contains("Tailscale") == true)
     }
 
+    func testGitReadsDiscardPreviousWorkspaceAndOldHostsAreNotProbed() async throws {
+        let backend = ControlledRemoteBackend()
+        let runtime = makeRuntime(backend: backend)
+        runtime.connectSSH(target: "ssh://host", expectedHostID: "host")
+        await waitUntil { await backend.bootstrapCount == 1 }
+        await backend.resolveBootstrap(.success(makeSnapshot(capabilities: [
+            "host.bootstrap", "session.input.write", "session.output.read",
+            RemoteControlProtocol.gitSettingsReadCapability,
+        ])))
+        await waitUntil { runtime.connectionState == .connected(name: "Host") }
+        let read = Task { try await runtime.gitSettings() }
+        await waitUntil { await backend.gitSettingsReads == 1 }
+        runtime.disconnect()
+        let fixture = try JSONDecoder().decode(RemoteGitSettings.self, from: Data(#"{"checking":false,"gitInstalled":true,"githubCliInstalled":true,"setupDirectory":"/tmp","name":"Remote","email":"remote@example.com","github":{"state":"connected","login":"remote-user","environmentToken":false,"gitConfigured":true}}"#.utf8))
+        await backend.resolveGitSettings(fixture)
+        do { _ = try await read.value; XCTFail("An old Host's credentials must not appear in the new workspace") }
+        catch is CancellationError {}
+
+        let oldBackend = ControlledRemoteBackend()
+        let oldRuntime = makeRuntime(backend: oldBackend)
+        oldRuntime.connectSSH(target: "ssh://old", expectedHostID: "host")
+        await waitUntil { await oldBackend.bootstrapCount == 1 }
+        await oldBackend.resolveBootstrap(.success(makeSnapshot()))
+        await waitUntil { oldRuntime.connectionState == .connected(name: "Host") }
+        do { _ = try await oldRuntime.gitSettings(); XCTFail("Read requires the advertised Git capability") } catch {}
+        do { try await oldRuntime.setGitSettings(.init(action: "connectGithub")); XCTFail("Sign-in requires the write capability") } catch {}
+        let reads = await oldBackend.gitSettingsReads
+        let writes = await oldBackend.gitSettingsWrites
+        XCTAssertEqual(reads, 0)
+        XCTAssertEqual(writes.count, 0)
+        oldRuntime.disconnect()
+    }
+
+    func testGitSignInIsSentToTheSelectedHost() async throws {
+        let backend = ControlledRemoteBackend()
+        let runtime = makeRuntime(backend: backend)
+        runtime.connectSSH(target: "ssh://remote", expectedHostID: "host")
+        await waitUntil { await backend.bootstrapCount == 1 }
+        await backend.resolveBootstrap(.success(makeSnapshot(capabilities: [
+            "host.bootstrap", "session.input.write", "session.output.read", RemoteControlProtocol.gitSettingsSetCapability,
+        ])))
+        await waitUntil { runtime.connectionState == .connected(name: "Host") }
+        let request = RemoteGitSettingsAction(action: "connectGithub")
+        try await runtime.setGitSettings(request)
+        let writes = await backend.gitSettingsWrites
+        XCTAssertEqual(writes.count, 1)
+        XCTAssertEqual(writes.first?.requestID, request.requestID)
+        XCTAssertEqual(writes.first?.action, "connectGithub")
+        runtime.disconnect()
+    }
+
     func testUpdateReadsRequireCapabilityAndRejectResultsAfterDisconnect() async throws {
         let backend = ControlledRemoteBackend()
         let runtime = makeRuntime(backend: backend)
@@ -3245,6 +3296,22 @@ private final class FeedRecorder {
 }
 
 private actor ControlledRemoteBackend: NativeRemoteBackendProtocol {
+    private(set) var gitSettingsReads = 0
+    private(set) var gitSettingsWrites: [RemoteGitSettingsAction] = []
+    private var gitSettingsContinuation: CheckedContinuation<RemoteGitSettings, Error>?
+    func gitSettings() async throws -> RemoteGitSettings {
+        gitSettingsReads += 1
+        return try await withCheckedThrowingContinuation { gitSettingsContinuation = $0 }
+    }
+    func resolveGitSettings(_ value: RemoteGitSettings) {
+        gitSettingsContinuation?.resume(returning: value)
+        gitSettingsContinuation = nil
+    }
+    func setGitSettings(_ action: RemoteGitSettingsAction) async throws -> NativeRemoteEffectReceipt {
+        gitSettingsWrites.append(action)
+        return NativeRemoteEffectReceipt(requestID: 915)
+    }
+
     private(set) var pluginUpdateReads = 0
     private var pluginUpdateContinuation: CheckedContinuation<RemotePluginUpdates, Error>?
     func pluginUpdates() async throws -> RemotePluginUpdates {

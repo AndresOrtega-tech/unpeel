@@ -59,6 +59,7 @@ enum ChromeIcon: String, CaseIterable {
     case settingsPresets
     case quickPreset
     case settingsAgents
+    case settingsGit
     case settingsPlugins
     case settingsAgentAccess
     /// Phosphor "sidebar" — Settings ▸ Workspaces.
@@ -284,7 +285,7 @@ enum ChromeIcon: String, CaseIterable {
                 gradientID: "settingsBrowserGlass",
                 inverted: inverted
             )
-        case .settingsWorktrees:
+        case .settingsGit, .settingsWorktrees:
             return Self.glassSVG(
                 path: ##"M232,76a28,28,0,1,0-31.47,27.71A68.1,68.1,0,0,1,136,167.48V192a8,8,0,0,1-16,0V167.48A68.1,68.1,0,0,1,55.47,103.71,28,28,0,1,0,24,76a28,28,0,0,0,31.47,27.71,52.08,52.08,0,0,0,48.53,48.15V80a8,8,0,0,1,16,0v71.86a52.08,52.08,0,0,0,48.53-48.15A28,28,0,0,0,232,76ZM56,64A12,12,0,1,1,44,76,12,12,0,0,1,56,64ZM88,204a12,12,0,1,1-12-12A12,12,0,0,1,88,204ZM200,88a12,12,0,1,1,12-12A12,12,0,0,1,200,88Z"##,
                 gradientID: "settingsWorktreesGlass",
@@ -399,7 +400,7 @@ struct ChromeIconView: View {
         case .settingsSessions: return "bubble.left.and.bubble.right"
         case .settingsComputer: return "cursorarrow.click"
         case .settingsBrowser: return "globe"
-        case .settingsWorktrees: return "arrow.triangle.branch"
+        case .settingsGit, .settingsWorktrees: return "arrow.triangle.branch"
         case .settingsAdvanced: return "terminal"
         }
     }

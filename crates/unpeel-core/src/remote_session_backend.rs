@@ -3085,6 +3085,34 @@ impl RemoteSessionBackend {
         })
     }
 
+    /// Git account metadata and device challenges, never credentials.
+    pub fn read_git_settings(&self) -> Result<Value, RemoteSessionBackendError> {
+        let body = self.inner.perform_read(
+            "Git settings",
+            "settings.git.read",
+            "/mobile/git-settings",
+            &[],
+        )?;
+        serde_json::from_slice(&body).map_err(|error| RemoteSessionBackendError::InvalidResponse {
+            operation: "Git settings",
+            message: error.to_string(),
+        })
+    }
+
+    pub fn set_git_settings(
+        &self,
+        body: &Value,
+    ) -> Result<RemoteEffectReceipt, RemoteEffectFailure> {
+        let turn = self.inner.begin_effect();
+        self.inner.perform_effect(
+            &turn,
+            "Git settings",
+            "settings.git.set",
+            "/mobile/git-settings",
+            encode_effect_body("Git settings", body)?,
+        )
+    }
+
     /// Lazy Host-owned update checks; this read returns cached/pending results
     /// immediately and never runs an installer.
     pub fn read_plugin_updates(&self) -> Result<Value, RemoteSessionBackendError> {
@@ -7536,6 +7564,53 @@ mod tests {
         ));
         assert!(!backend.needs_bootstrap());
         assert_eq!(connection.remaining(), 0);
+    }
+
+    #[test]
+    fn git_settings_require_capabilities_and_keep_effects_on_the_bound_host() {
+        for supported in [false, true] {
+            let connection = ScriptedConnection::new();
+            let generation = connection.generation(1);
+            let mut capabilities = vec![BOOTSTRAP_CAPABILITY];
+            if supported {
+                capabilities.extend(["settings.git.read", "settings.git.set"]);
+            }
+            add_bootstrap(
+                &connection,
+                generation,
+                bootstrap_json(Some("git-host"), HOST_PROTOCOL_MAJOR, Some(&capabilities)),
+            );
+            let response = json!({"github":{"state":"connected","login":"remote-user"}});
+            let action = json!({"action":"connectGithub","requestID":"23f1c575-b187-4350-8a46-773eb49028b7"});
+            if supported {
+                connection.push(reply_step(
+                    expected_read(generation, "/mobile/git-settings", vec![]),
+                    generation,
+                    200,
+                    serde_json::to_vec(&response).unwrap(),
+                ));
+                connection.push(reply_step(
+                    expected_effect(generation, "/mobile/git-settings", action.clone()),
+                    generation,
+                    200,
+                    br#"{"ok":true}"#.to_vec(),
+                ));
+            }
+            let backend = RemoteSessionBackend::new(connection.clone());
+            backend.bootstrap().unwrap();
+            if supported {
+                assert_eq!(backend.read_git_settings().unwrap(), response);
+                assert!(backend.set_git_settings(&action).is_ok());
+            } else {
+                assert!(matches!(
+                    backend.read_git_settings(),
+                    Err(RemoteSessionBackendError::MissingCapability(_))
+                ));
+                assert!(backend.set_git_settings(&action).is_err());
+                assert_eq!(connection.calls().len(), 1);
+            }
+            assert_eq!(connection.remaining(), 0);
+        }
     }
 
     #[test]
