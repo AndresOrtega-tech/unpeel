@@ -15132,10 +15132,6 @@ final class UnpeelStore: ObservableObject {
     /// While the palette is open its own monitor owns the list keys; only
     /// ⌘K (close) is handled here.
     private func handleShortcutKeyDown(_ event: NSEvent) -> Bool {
-        // Remote Ghostty owns its complete key stream. Local command palette,
-        // launch, session, and project shortcuts must neither consume those
-        // keys nor mutate the still-loaded Local workspace behind it.
-        guard selectedHostScope == .local else { return false }
         let mods = event.modifierFlags
             .intersection([.command, .option, .control, .shift])
         let char = event.charactersIgnoringModifiers?.lowercased()
@@ -15144,10 +15140,17 @@ final class UnpeelStore: ObservableObject {
         // focused Ghostty surface claims key equivalents that collide with
         // ghostty keybindings before the menu sees them (AppTerminalView.
         // performKeyEquivalent) — so the monitor owns the actual keys.
+        // ⌘K is a Controller surface that opens in every workspace scope,
+        // so it is claimed ahead of the local-only guard below.
         if mods == .command, char == "k" {
             toggleCommandPalette()
             return true
         }
+
+        // Remote Ghostty owns the rest of its key stream. Local launch,
+        // session, and project shortcuts must neither consume those keys nor
+        // mutate the still-loaded Local workspace behind it.
+        guard selectedHostScope == .local else { return false }
 
         guard !commandPaletteVisible else { return false }
 
