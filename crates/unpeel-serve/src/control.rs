@@ -228,16 +228,6 @@ pub fn send_text(session_dir: &Path, data: &str) -> Result<(), String> {
     .map(|_| ())
 }
 
-/// Resize the real PTY — explicit user intent (the focused pane takes the
-/// grid, like a phone attach). Every other viewer letterboxes in response.
-pub fn send_resize(session_dir: &Path, cols: u16, rows: u16) -> Result<(), String> {
-    roundtrip(
-        session_dir,
-        serde_json::json!({"type": "resize", "cols": cols, "rows": rows}),
-    )
-    .map(|_| ())
-}
-
 pub fn viewport_snapshot(
     session_dir: &Path,
     scroll_offset_rows: u32,

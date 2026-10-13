@@ -1915,7 +1915,17 @@ fn handle_with_effects(
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0)
                 .clamp(2, 120);
-            match crate::control::send_resize(&dir, cols as u16, rows as u16) {
+            // Resolve the control socket through core: a workspace home's
+            // session dir is too deep for `sockaddr_un`, so its socket lives
+            // at the short `/tmp` fallback, not `<dir>/session.sock`.
+            match unpeel_core::session_host::send_command_with_timeout(
+                &session_id,
+                &unpeel_core::session_host::SessionHostCommand::Resize {
+                    cols: cols as u16,
+                    rows: rows as u16,
+                },
+                Duration::from_secs(1),
+            ) {
                 Ok(()) => {
                     if let Ok(mut guard) = resizes.lock() {
                         guard.insert(session_id, Instant::now());
