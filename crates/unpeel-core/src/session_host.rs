@@ -368,6 +368,13 @@ pub struct HostedSessionManifest {
     /// apply or nothing matched yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_activity: Option<String>,
+    /// The `OSC 7501` record that speaks for this terminal (most urgent,
+    /// then most recent), edge-written by the PTY core as programs report
+    /// (`crate::program_status`). While present it outranks hooks and the
+    /// screen tier: the program said what it is doing. Absent when the
+    /// terminal holds no records; legacy manifests predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_status: Option<crate::program_status::ProgramStatusSummary>,
     /// Wall-clock ms when the parsed screen TEXT last changed, written by the
     /// same viewport scan (coalesced to at most one manifest write per ~2s).
     /// This is the "really doing something" signal: idle repaint loops that
@@ -2926,6 +2933,10 @@ enum HostAnsweredQuery {
     OscColor { code: u8 },
     /// `OSC 4 ; <index> ; ?` palette query — probe-gated.
     OscPalette { index: u16 },
+    /// `OSC 7501 ; ?` Program Status feature detection — always
+    /// host-answered: the Host keeps the records, and no surface knows the
+    /// protocol (see `crate::program_status`).
+    ProgramStatus,
 }
 
 /// Scans the hosted child's terminal-bound output for Primary Device
@@ -2995,7 +3006,7 @@ impl OutputQueryScanner {
                         self.seq.push(byte);
                         self.state = QueryScanState::Csi;
                     }
-                    b']' if intercept_probes => {
+                    b']' => {
                         self.seq.push(byte);
                         self.state = QueryScanState::Osc;
                     }
@@ -3052,7 +3063,7 @@ impl OutputQueryScanner {
                     // BEL terminates the OSC.
                     0x07 => {
                         self.seq.push(byte);
-                        if let Some(query) = Self::osc_color_query(&self.seq) {
+                        if let Some(query) = Self::osc_query(&self.seq, intercept_probes) {
                             self.seq.clear();
                             self.state = QueryScanState::Ground;
                             queries.push(query);
@@ -3075,7 +3086,7 @@ impl OutputQueryScanner {
                 QueryScanState::OscEscape => {
                     if byte == 0x5c {
                         self.seq.push(byte);
-                        if let Some(query) = Self::osc_color_query(&self.seq) {
+                        if let Some(query) = Self::osc_query(&self.seq, intercept_probes) {
                             self.seq.clear();
                             self.state = QueryScanState::Ground;
                             queries.push(query);
@@ -3100,7 +3111,7 @@ impl OutputQueryScanner {
                                 self.seq.push(byte);
                                 self.state = QueryScanState::Csi;
                             }
-                            b']' if intercept_probes => {
+                            b']' => {
                                 self.seq.push(byte);
                                 self.state = QueryScanState::Osc;
                             }
@@ -3155,6 +3166,21 @@ impl OutputQueryScanner {
             b"?u" => Some(HostAnsweredQuery::KittyFlags),
             _ => None,
         }
+    }
+
+    /// OSC queries the host answers: Program Status feature detection
+    /// (`OSC 7501 ; ?`) always, the color queries only when probing.
+    fn osc_query(seq: &[u8], intercept_probes: bool) -> Option<HostAnsweredQuery> {
+        let body = &seq[2..];
+        let body = body
+            .strip_suffix(&[0x07])
+            .or_else(|| body.strip_suffix(&[0x1b, b'\\']))?;
+        if body == b"7501;?" {
+            return Some(HostAnsweredQuery::ProgramStatus);
+        }
+        intercept_probes
+            .then(|| Self::osc_color_query(seq))
+            .flatten()
     }
 
     /// Probe-gated OSC color queries: `OSC 10 ; ?`, `OSC 11 ; ?` (fg/bg) and
@@ -6089,6 +6115,7 @@ pub(crate) fn start_host(
             computer_client_registered: false,
             menu_prompt_active: false,
             screen_activity: None,
+            program_status: None,
             terminal_modes: None,
             screen_changed_at: None,
             detected_local_urls: Vec::new(),
@@ -7209,6 +7236,7 @@ exit "${UNPEEL_FAKE_PROVIDER_STATUS:-0}"
             computer_client_registered: false,
             menu_prompt_active: false,
             screen_activity: None,
+            program_status: None,
             terminal_modes: None,
             screen_changed_at: None,
             detected_local_urls: Vec::new(),
@@ -7330,6 +7358,7 @@ exit "${UNPEEL_FAKE_PROVIDER_STATUS:-0}"
             computer_client_registered: false,
             menu_prompt_active: false,
             screen_activity: None,
+            program_status: None,
             terminal_modes: None,
             screen_changed_at: None,
             detected_local_urls: Vec::new(),
@@ -8645,6 +8674,24 @@ exit "${UNPEEL_FAKE_PROVIDER_STATUS:-0}"
         let (out, queries) = scan_probes(&mut scanner, input);
         assert_eq!(out, input.to_vec());
         assert!(queries.is_empty());
+    }
+
+    #[test]
+    fn query_scanner_answers_program_status_detection_with_a_surface_attached() {
+        // Claude Code 2.1's exact startup batch: OSC 11, XTVERSION, kitty
+        // flags, then `OSC 7501 ; ?`. With a surface attached only the
+        // Program Status query is the Host's; the rest stay the surface's.
+        let probe = b"\x1b]11;?\x07\x1b[>0q\x1b[?u\x1b]7501;?\x07\x1b[>4m";
+        let mut scanner = OutputQueryScanner::new();
+        let (out, queries) = scanner.scan(probe, false);
+        assert_eq!(out, b"\x1b]11;?\x07\x1b[>0q\x1b[?u\x1b[>4m".to_vec());
+        assert_eq!(queries, vec![HostAnsweredQuery::ProgramStatus]);
+        // ST-terminated and split across chunks; reports pass through.
+        let (out1, q1) = scanner.scan(b"a\x1b]7501;", false);
+        let (out2, q2) = scanner.scan(b"?\x1b\\b\x1b]7501;state=idle\x07", false);
+        assert_eq!((out1, q1), (b"a".to_vec(), vec![]));
+        assert_eq!(out2, b"b\x1b]7501;state=idle\x07".to_vec());
+        assert_eq!(q2, vec![HostAnsweredQuery::ProgramStatus]);
     }
 
     #[test]

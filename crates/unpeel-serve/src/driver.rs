@@ -1112,7 +1112,17 @@ impl HostRuntime {
                 // A screen-derived edge is not proof of completion: the
                 // fallback tier animates the sidebar but never notifies.
                 && row.status_source != crate::sessions::StatusSource::Screen
-                && (!self.engine.is_latched(&row.id) || self.engine.is_completed(&row.id))
+                && match row.status_source {
+                    // A program's report says whether it finished (`done`,
+                    // `error`) or was interrupted back to `idle`.
+                    crate::sessions::StatusSource::Program => row
+                        .program_status
+                        .as_ref()
+                        .is_some_and(|program| program.state.is_finished()),
+                    _ => {
+                        !self.engine.is_latched(&row.id) || self.engine.is_completed(&row.id)
+                    }
+                }
                 && matches!(
                     old,
                     Some(Status::Starting | Status::Busy | Status::Attention)

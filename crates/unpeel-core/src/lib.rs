@@ -89,6 +89,8 @@ pub mod plugins;
 /// exercised by `scripts/ci/check-portable-core.sh`).
 #[cfg(all(test, feature = "controller-core"))]
 mod portable_gating_tests;
+#[cfg(feature = "native-host")]
+pub mod program_status;
 #[cfg(feature = "controller-core")]
 #[cfg(feature = "native-host")]
 pub mod pty_core;

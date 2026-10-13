@@ -84,14 +84,21 @@ makes sense for coding, it does not belong here.
   (`protocol/browser-engine-v1.json`) is installed and hash-verified by
   the Host. Desktop automation belongs to the agent or VM environment.
   Unpeel never ships or requires a Node runtime.
-- **Hooks are the busy/idle authority.** Provider hook assets under
-  `runtimes/<slug>/assets/hooks/` report lifecycle to the Host's hook port;
-  raw output growth never flips busy/idle, and nothing overrides a hook
-  latch. The one fallback is the screen tier: a runtime's declared
-  `[screen]` rules classify the parsed viewport while no hook has latched
-  (integration not installed), published as `activitySource: "screen"` and
-  never a completion notification. Hook scripts broadcast to every port in
-  `~/.unpeel/app-ports`.
+- **A program's own report is the busy/idle authority; hooks are the
+  bridge.** A program that speaks the Program Status Protocol (`OSC 7501`,
+  `crates/unpeel-core/src/program_status.rs`; Claude Code does) reports
+  idle/working/done/blocked/error inside its PTY output. The Host answers
+  the `OSC 7501 ; ?` detection query, keeps the records, and edge-writes
+  the manifest's `program_status`; while a record is live it outranks
+  hooks and is published as `activitySource: "program"`. Below it,
+  provider hook assets under `runtimes/<slug>/assets/hooks/` report
+  lifecycle to the Host's hook port for agents that do not speak 7501 yet
+  (hook scripts broadcast to every port in `~/.unpeel/app-ports`). Raw
+  output growth never flips busy/idle, and nothing overrides a program
+  record or a hook latch. The last fallback is the screen tier: a runtime's
+  declared `[screen]` rules classify the parsed viewport while nothing else
+  has spoken, published as `activitySource: "screen"` and never a
+  completion notification.
 - **Launches are plain; integrations are explicit.** A preset runs its
   command in the user's login shell exactly as typed, with only Unpeel's
   generic session environment exported. Nothing wraps an executable,
@@ -230,8 +237,9 @@ Detail lives in `docs/agents/clients/` (`dev-builds.md`, `terminal.md`,
   connects, pre-warm surfaces, and never let a reconnect visibly end a
   session. A change that improves a benchmark but adds a flash is a
   regression.
-- **Hooks are the busy/idle authority on the client too.** The app renders
-  Host-published activity; the Swift rescan/activity engine is only the
+- **The Host is the busy/idle authority on the client too.** The app
+  renders Host-published activity (program reports, then hooks, then the
+  screen tier); the Swift rescan/activity engine is only the
   no-flash startup seed. Terminal output never flips busy/idle. Agent-drawn
   select menus fire no hooks — they are detected from the parsed viewport
   (shared detector, Host-side) and surfaced as attention.

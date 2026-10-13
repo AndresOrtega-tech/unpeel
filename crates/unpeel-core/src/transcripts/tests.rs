@@ -97,6 +97,7 @@ fn test_manifest(command: &str) -> HostedSessionManifest {
         computer_client_registered: false,
         menu_prompt_active: false,
         screen_activity: None,
+        program_status: None,
         terminal_modes: None,
         screen_changed_at: None,
         detected_local_urls: Vec::new(),

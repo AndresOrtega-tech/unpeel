@@ -17,6 +17,9 @@
 
 use super::core_reactor::{JournalMsg, ReactorHandle, Registry, TimerMsg};
 use super::*;
+use crate::program_status::{
+    ProcessOwner, ProgramStatusScanner, ProgramStatusStore, ProgramStatusSummary, StreamEvent,
+};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -219,6 +222,7 @@ pub(crate) struct SessionIo {
     query_scanner: OutputQueryScanner,
     title_scanner: OscTitleScanner,
     agent_title_settled: bool,
+    program_status: ProgramStatusTracker,
     dark_mode: bool,
     journal: JournalHandle,
     pending_input: VecDeque<u8>,
@@ -276,6 +280,7 @@ impl SessionIo {
             query_scanner: OutputQueryScanner::new(),
             title_scanner: OscTitleScanner::new(),
             agent_title_settled: false,
+            program_status: ProgramStatusTracker::default(),
             dark_mode,
             journal,
             pending_input: VecDeque::new(),
@@ -510,6 +515,9 @@ impl SessionIo {
                         .writer
                         .write_all(format!("\x1b[{};{}R", cursor.0 + 1, cursor.1 + 1).as_bytes()),
                     HostAnsweredQuery::KittyFlags => guard.writer.write_all(b"\x1b[?0u"),
+                    HostAnsweredQuery::ProgramStatus => {
+                        guard.writer.write_all(crate::program_status::FEATURE_REPLY)
+                    }
                     HostAnsweredQuery::OscColor { code } => {
                         let rgb = match (code, self.dark_mode) {
                             (10, true) => "f3f3/f5f5/fbfb",
@@ -548,6 +556,7 @@ impl SessionIo {
         let shared = Arc::clone(&self.shared);
         shared.viewport.lock().unwrap().feed(&chunk);
         let agent_title = self.title_scanner.scan(&chunk);
+        let program_events = self.program_status.scanner.scan(&chunk);
         shared.broadcaster.lock().unwrap().broadcast_chunk(&chunk);
         self.journal
             .pressure
@@ -566,6 +575,109 @@ impl SessionIo {
             if !self.agent_title_settled {
                 self.agent_title_settled = apply_agent_terminal_title(&shared.session_id, &title);
             }
+        }
+        if !program_events.is_empty() {
+            self.apply_program_status_events(program_events);
+        }
+    }
+
+    /// Apply `OSC 7501` reports and the lifetime events that drop records
+    /// (`OSC 133 ; A`, `RIS`), then publish the summary if it moved.
+    fn apply_program_status_events(&mut self, events: Vec<StreamEvent>) {
+        let now = current_timestamp_ms();
+        let mut owner = None;
+        let mut changed = false;
+        for event in events {
+            changed |= match event {
+                StreamEvent::Report(body) => {
+                    let Some(report) = crate::program_status::parse_report(&body) else {
+                        continue;
+                    };
+                    // The foreground job owns the record, so its exit (even
+                    // a SIGKILL that never says `clear`) ends live states.
+                    let owner = *owner.get_or_insert_with(|| self.foreground_owner());
+                    self.program_status.store.apply(report, owner, now)
+                }
+                StreamEvent::PromptStart => self.program_status.store.drop_transient(),
+                StreamEvent::FullReset => self.program_status.store.reset(),
+            };
+        }
+        if changed {
+            self.publish_program_status(false);
+        }
+    }
+
+    fn foreground_owner(&self) -> Option<ProcessOwner> {
+        let pgid = self
+            .shared
+            .runtime
+            .lock()
+            .unwrap()
+            .master
+            .process_group_leader()?;
+        let pid = u32::try_from(pgid).ok()?;
+        // No start time, no identity: such a record is never swept (it
+        // still ends on `clear`, a new prompt, or the Session's exit).
+        let started_at = process_start_time_ms(pid)?;
+        Some(ProcessOwner { pid, started_at })
+    }
+
+    /// Edge-write the summary into the manifest and announce it. A new
+    /// state or kind lands at once; progress/msg churn is coalesced so a
+    /// chatty progress bar cannot turn into a manifest write per frame
+    /// (`sweep_program_status` lands the tail).
+    fn publish_program_status(&mut self, force: bool) {
+        let tracker = &mut self.program_status;
+        let summary = tracker.store.summary();
+        if tracker.published.as_ref() == Some(&summary) {
+            tracker.dirty = false;
+            return;
+        }
+        let edge = |summary: &Option<ProgramStatusSummary>| {
+            summary
+                .as_ref()
+                .map(|summary| (summary.state, summary.kind))
+        };
+        let state_edge = tracker
+            .published
+            .as_ref()
+            .is_none_or(|published| edge(&summary) != edge(published));
+        if !state_edge
+            && !force
+            && tracker
+                .last_write
+                .is_some_and(|at| at.elapsed() < PROGRAM_STATUS_COALESCE)
+        {
+            tracker.dirty = true;
+            return;
+        }
+        tracker.dirty = false;
+        tracker.last_write = Some(Instant::now());
+        tracker.published = Some(summary.clone());
+        let _ = update_manifest_session(&self.shared.session_id, |manifest| {
+            manifest.program_status = summary;
+        });
+        crate::state_bus::announce(crate::state_bus::Change::SessionMarkers, None);
+    }
+
+    /// Idle tick: land coalesced updates, and end live records whose
+    /// reporting process has exited (verified by pid + start time).
+    pub(crate) fn sweep_program_status(&mut self) {
+        let tracker = &mut self.program_status;
+        if tracker.published.is_none() {
+            // First tick in this core: the manifest may carry a record from
+            // a previous core (an adopted Session) that no live store holds.
+            let persisted =
+                load_manifest(&self.shared.session_id).and_then(|manifest| manifest.program_status);
+            tracker.published = Some(persisted);
+            tracker.dirty |= tracker.store.is_empty();
+        }
+        let departed = tracker.store.has_owned_transient()
+            && tracker
+                .store
+                .sweep_departed(|owner| process_start_time_ms(owner.pid) == Some(owner.started_at));
+        if departed || self.program_status.dirty {
+            self.publish_program_status(true);
         }
     }
 
@@ -2271,4 +2383,21 @@ mod handed_over_child_tests {
         let status = stranger.wait().unwrap();
         assert!(!status.success(), "SIGKILL reached the verified child");
     }
+}
+
+/// Minimum spacing between manifest writes that change only a record's
+/// progress or text; state changes are never delayed.
+const PROGRAM_STATUS_COALESCE: Duration = Duration::from_millis(500);
+
+/// One Session's `OSC 7501` records (see `crate::program_status`).
+#[derive(Default)]
+struct ProgramStatusTracker {
+    scanner: ProgramStatusScanner,
+    store: ProgramStatusStore,
+    /// The summary last written to the manifest; `None` until this core
+    /// knows what the manifest holds.
+    published: Option<Option<ProgramStatusSummary>>,
+    /// A coalesced change is waiting for the next idle tick.
+    dirty: bool,
+    last_write: Option<Instant>,
 }

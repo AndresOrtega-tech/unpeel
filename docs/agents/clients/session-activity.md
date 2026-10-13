@@ -11,8 +11,53 @@ snapshot). Since 2026-09-03 the app ingests no hook events itself: the
 `persistActivitySnapshot`, and the menu-prompt notification publisher are
 deleted; every edge below describes the worker.
 
-Animated Busy has one exact authority: explicit lifecycle events from the
-runtime's installed Unpeel integration. Below it sits one fallback tier, the
+### Program Status (OSC 7501) — the first authority
+
+A program that speaks the [Program Status Protocol][osc7501] tells its
+terminal what it is doing: `ESC ] 7501 ; state=working:app=cargo:msg=<base64> ST`
+with `idle`, `working`, `done`, `blocked` (`kind` = permission / question /
+auth), or `error`. Claude Code (2.1.x) sends the detection query
+`OSC 7501 ; ?` at startup and reports only when a terminal answers. The
+Host is that terminal for every hosted PTY:
+
+- `OutputQueryScanner` answers `OSC 7501 ; ?` itself, always (a surface
+  being attached or not), excises it from the stream, and replies before
+  the DA1 answer so the spec's "query, then `CSI c`" idiom resolves to
+  supported.
+- The PTY core scans published output (`ProgramStatusScanner`), applies
+  reports to a per-Session `ProgramStatusStore` (full replacement,
+  `/`-separated ids, `clear` of a subtree, the spec's size limits, base64
+  text with control characters refused and bidi overrides stripped, 256
+  records with LRU eviction), and edge-writes the most urgent record —
+  blocked > working > error > done > idle, most recent among equals — as
+  the manifest's `program_status`, announcing on the state bus. State and
+  kind changes land at once; progress/text churn is coalesced to ≥500 ms.
+- Lifetime follows the spec: `OSC 133 ; A` (new prompt) drops `working`,
+  `blocked`, and `idle`; `RIS` drops everything; `done` and `error`
+  survive. Each record remembers the foreground process group leader that
+  reported it (pid + kernel start time); the core's idle tick drops live
+  records whose reporter has exited, so a SIGKILLed program never stays
+  busy.
+- The worker maps a live record straight to the row: working → Busy,
+  blocked → Attention, idle/done/error → Idle, with
+  `activitySource: "program"`. It outranks hooks, the screen tier, and the
+  menu heuristic; the hook engine keeps observing underneath and owns the
+  row again the moment the program clears its records. Only `done` and
+  `error` count as a finished turn (completion notification, `completed`);
+  a program interrupted back to `idle` is not one.
+- Session rows carry `programStatus` (`state`, `kind`, `progress`, `app`,
+  `title`, `message`, `updatedAtUnixMs`) while running: untrusted,
+  single-line, display-only text.
+
+Matrix: `crates/unpeel-cli/tests/cases/program_status.py`.
+
+[osc7501]: https://www.superlogical.com/rex/docs/build/program-status
+
+### Hooks and the screen tier
+
+Without a program record, animated Busy has one exact authority: explicit
+lifecycle events from the runtime's installed Unpeel integration. Below it
+sits one fallback tier, the
 Herdr-style **screen tier**: a recognized agent whose runtime declares
 `[screen]` rules (`lifecycle.fallback = "screen"`; Claude, Codex, Gemini)
 takes a busy/idle verdict the Host derives from the bottom of its parsed

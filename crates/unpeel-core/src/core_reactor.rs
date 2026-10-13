@@ -1090,6 +1090,7 @@ impl Reactor {
             let ended = self.with_session(slot, |session, registry| {
                 session.sweep_stalled_clients(registry);
                 session.release_idle_buffers();
+                session.sweep_program_status();
                 if !session.shared.running.load(Ordering::Relaxed) {
                     // Safety net: a Kill whose wake was lost still ends.
                     if let ReadOutcome::Ended = session.drain_after_stop(registry) {

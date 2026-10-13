@@ -2035,7 +2035,7 @@ fn session_summary_with_menu_attention(
     let persisted_source = activity
         .and_then(|value| value.get("activity_source"))
         .and_then(Value::as_str)
-        .filter(|source| matches!(*source, "hooks" | "screen"));
+        .filter(|source| matches!(*source, "program" | "hooks" | "screen"));
     let activity_name = if !running {
         if unread {
             "done"
@@ -2077,6 +2077,11 @@ fn session_summary_with_menu_attention(
         "status": if running { "running" } else { "exited" },
         "activity": activity_name,
         "activitySource": running.then_some(persisted_source).flatten(),
+        "programStatus": manifest
+            .program_status
+            .as_ref()
+            .filter(|_| running)
+            .map(crate::program_status::ProgramStatusSummary::controller_json),
         "unread": unread,
         "pinned": pinned,
         "notifyWhenDone": false,
@@ -2730,6 +2735,7 @@ mod tests {
             computer_client_registered: false,
             menu_prompt_active: false,
             screen_activity: None,
+            program_status: None,
             terminal_modes: None,
             screen_changed_at: None,
             detected_local_urls: Vec::new(),

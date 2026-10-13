@@ -12,6 +12,7 @@ use std::time::SystemTime;
 
 use unpeel_core::app_paths;
 use unpeel_core::controller_api::HostCreatePreset;
+use unpeel_core::program_status::{ProgramState, ProgramStatusSummary};
 use unpeel_core::session_host::{HostedSessionManifest, HostedSessionState};
 use unpeel_core::state::AppState;
 
@@ -40,13 +41,15 @@ pub enum Status {
     Exited,
 }
 
-/// Where a running Session's busy/idle came from. Hooks are exact; the
-/// screen tier is a lower-confidence fallback for a recognized agent with
-/// no hook latch (its Unpeel integration is not installed, or has not
-/// spoken yet). Controllers may hint at the upgrade; the worker never sends
-/// completion notifications from a screen-derived edge.
+/// Where a running Session's busy/idle came from. A program's own
+/// `OSC 7501` report outranks everything while it holds a record; hooks are
+/// exact; the screen tier is a lower-confidence fallback for a recognized
+/// agent with no hook latch (its Unpeel integration is not installed, or
+/// has not spoken yet). Controllers may hint at the upgrade; the worker
+/// never sends completion notifications from a screen-derived edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusSource {
+    Program,
     Hooks,
     Screen,
     None,
@@ -55,6 +58,7 @@ pub enum StatusSource {
 impl StatusSource {
     pub fn word(self) -> &'static str {
         match self {
+            StatusSource::Program => "program",
             StatusSource::Hooks => "hooks",
             StatusSource::Screen => "screen",
             StatusSource::None => "none",
@@ -133,6 +137,9 @@ pub struct SessionRow {
     pub status: Status,
     /// Provenance of `status` while running; `None` otherwise.
     pub status_source: StatusSource,
+    /// The program's own `OSC 7501` report while running (the source of
+    /// `status` whenever present).
+    pub program_status: Option<ProgramStatusSummary>,
     pub created_at: u64,
     pub pinned: bool,
     pub archived: bool,
@@ -297,6 +304,39 @@ fn screen_fallback_status(manifest: &HostedSessionManifest) -> Option<Status> {
 }
 
 fn derive_status_with_source(
+    engine: &mut ActivityEngine,
+    manifest: &HostedSessionManifest,
+    running: bool,
+    dir: &std::path::Path,
+    now: SystemTime,
+    menu_attention_detection: bool,
+) -> (Status, StatusSource) {
+    // The hook engine keeps observing even while a program report wins, so
+    // it holds current state the moment the program clears its records.
+    let derived = derive_hook_or_screen_status(
+        engine,
+        manifest,
+        running,
+        dir,
+        now,
+        menu_attention_detection,
+    );
+    match manifest.program_status.as_ref().filter(|_| running) {
+        Some(program) => (program_status(program), StatusSource::Program),
+        None => derived,
+    }
+}
+
+/// A program's own report is the status: it said what it is doing.
+fn program_status(program: &ProgramStatusSummary) -> Status {
+    match program.state {
+        ProgramState::Working => Status::Busy,
+        ProgramState::Blocked => Status::Attention,
+        ProgramState::Idle | ProgramState::Done | ProgramState::Error => Status::Idle,
+    }
+}
+
+fn derive_hook_or_screen_status(
     engine: &mut ActivityEngine,
     manifest: &HostedSessionManifest,
     running: bool,
@@ -720,11 +760,17 @@ pub fn scan_sidebar(
             }
             let exited_at =
                 (manifest.state == HostedSessionState::Exited).then_some(manifest.updated_at);
+            let program_status = running.then(|| manifest.program_status.clone()).flatten();
             let activity_at = unpeel_core::session_ops::latest_lifecycle_ms(
                 &manifest.session.id,
                 &manifest.session.command,
                 manifest.session.created_at,
                 exited_at,
+            )
+            .max(
+                program_status
+                    .as_ref()
+                    .map_or(0, |program| program.changed_at),
             );
             let active_runtime_id = running
                 .then(|| unpeel_core::session_host::active_runtime_id(manifest).map(str::to_owned))
@@ -762,6 +808,7 @@ pub fn scan_sidebar(
                 running,
                 status,
                 status_source,
+                program_status,
                 created_at: manifest.session.created_at,
                 pinned: pinned_ids.contains(&manifest.session.id),
                 archived: marker_at.is_some()
@@ -1347,6 +1394,7 @@ pub fn model_from_bridge(
                 running,
                 status,
                 status_source: StatusSource::None,
+                program_status: None,
                 created_at,
                 pinned: session
                     .get("pinned")
@@ -1881,10 +1929,14 @@ pub fn mobile_snapshot(
                 .max(latest_alert.map(|entry| entry.at).unwrap_or(0)),
             "status": status,
             "activity": activity,
-            // Provenance of `activity` while running: "hooks" (exact) or
-            // "screen" (fallback tier: integration not installed / no
-            // hook latch yet). Additive; older Controllers ignore it.
+            // Provenance of `activity` while running: "program" (the
+            // program's own OSC 7501 report), "hooks" (exact), or "screen"
+            // (fallback tier: integration not installed / no hook latch
+            // yet). Additive; older Controllers ignore it.
             "activitySource": row.running.then(|| row.status_source.word()),
+            // What the program says it is doing (OSC 7501), while running.
+            // Untrusted, display-only text: one line, no control characters.
+            "programStatus": row.program_status.as_ref().filter(|_| row.running).map(ProgramStatusSummary::controller_json),
             "unread": unread,
             "pinned": row.pinned,
             "notifyWhenDone": false,
@@ -2362,6 +2414,7 @@ mod tests {
             running,
             status,
             status_source: StatusSource::None,
+            program_status: None,
             created_at: 1,
             pinned,
             archived: false,
@@ -2896,6 +2949,7 @@ mod tests {
             running: true,
             status: Status::Idle,
             status_source: StatusSource::None,
+            program_status: None,
             created_at: 1,
             pinned: false,
             archived: false,
@@ -2952,6 +3006,7 @@ mod tests {
             running: true,
             status: Status::Busy,
             status_source: StatusSource::None,
+            program_status: None,
             created_at: 1,
             pinned: false,
             archived: false,
@@ -3007,6 +3062,7 @@ mod tests {
             running: true,
             status: Status::Busy,
             status_source: StatusSource::None,
+            program_status: None,
             created_at: 1,
             pinned: false,
             archived: false,
@@ -3209,6 +3265,74 @@ mod tests {
         assert_eq!(
             derive_status_with_source(&mut engine, &working, true, &directory, now, true),
             (Status::Idle, StatusSource::Hooks)
+        );
+    }
+
+    /// A program's own `OSC 7501` report outranks hooks, the screen tier,
+    /// and the menu heuristic while it holds a record; the hook engine keeps
+    /// observing underneath and owns the state again once records clear.
+    #[test]
+    fn program_status_outranks_hooks_and_screen_until_cleared() {
+        let manifest_for = |program: serde_json::Value| -> HostedSessionManifest {
+            serde_json::from_value(serde_json::json!({
+                "session": {
+                    "id": "program-status",
+                    "project_id": "project",
+                    "label": "Terminal",
+                    "command": ""
+                },
+                "cwd": "/tmp",
+                "state": "running",
+                "pid": 123,
+                "exit_code": null,
+                "runtime": { "currentObservation": { "id": "claude", "pid": 124, "pid_started_at": 5, "processGroupID": 124 } },
+                "screen_activity": "working",
+                "menu_prompt_active": true,
+                "program_status": program
+            }))
+            .expect("manifest decodes")
+        };
+        let directory = std::env::temp_dir().join("unpeel-program-status-no-seed");
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let mut engine = ActivityEngine::default();
+
+        for (program, status) in [
+            (
+                serde_json::json!({ "state": "working", "app": "claude-code" }),
+                Status::Busy,
+            ),
+            (
+                serde_json::json!({ "state": "blocked", "kind": "permission" }),
+                Status::Attention,
+            ),
+            (serde_json::json!({ "state": "done" }), Status::Idle),
+            (serde_json::json!({ "state": "error" }), Status::Idle),
+            (serde_json::json!({ "state": "idle" }), Status::Idle),
+        ] {
+            let manifest = manifest_for(program.clone());
+            assert_eq!(
+                derive_status_with_source(&mut engine, &manifest, true, &directory, now, true),
+                (status, StatusSource::Program),
+                "{program}"
+            );
+            // An exited Session is exited whatever its last report said.
+            assert_eq!(
+                derive_status_with_source(&mut engine, &manifest, false, &directory, now, true),
+                (Status::Exited, StatusSource::None)
+            );
+        }
+        // A latched hook does not override a live record...
+        engine.apply_hook_event("program-status", "UserPromptSubmit", None, now);
+        let done = manifest_for(serde_json::json!({ "state": "done" }));
+        assert_eq!(
+            derive_status_with_source(&mut engine, &done, true, &directory, now, true).1,
+            StatusSource::Program
+        );
+        // ...and owns the state again once the program clears its records.
+        let cleared = manifest_for(serde_json::Value::Null);
+        assert_eq!(
+            derive_status_with_source(&mut engine, &cleared, true, &directory, now, true).1,
+            StatusSource::Hooks
         );
     }
 
