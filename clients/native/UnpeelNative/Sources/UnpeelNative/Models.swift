@@ -225,15 +225,17 @@ enum McpRole: String, CaseIterable, Identifiable {
         }
     }
 
-    /// One-line explanation shown with the menu item.
+    /// One-line explanation shown under the sidebar Agent access picker.
+    /// Keep it short: an NSMenu item never wraps, so this line sets the
+    /// submenu's width.
     var detail: String {
         switch self {
         case .read:
-            return "Reads every session. Writing to another session follows Settings ▸ Agent access."
+            return "Reads any session; writes follow Settings."
         case .write:
-            return "Also writes to any other session without asking."
+            return "Also writes to other sessions."
         case .manage:
-            return "Also starts new sessions and removes the ones it started."
+            return "Also starts and removes its own sessions."
         }
     }
 }
