@@ -281,8 +281,7 @@ struct CommandPaletteOverlay: View {
         var byID: [String: SessionMeta] = [:]
         var order: [(id: String, working: Bool, recency: Int64)] = []
         func walk(_ node: ProjectNode, topLevelProjectID: String) {
-            for session in node.sessions
-            where !store.archivedSessionIDs.contains(session.id) {
+            for session in node.sessions {
                 let recency = recencyByID[session.id]
                     ?? max(session.createdAt, session.lifecycleAtMs ?? 0)
                 let unread = store.unreadSessionIDs.contains(session.id)
@@ -436,36 +435,6 @@ struct CommandPaletteOverlay: View {
         return nil
     }
 
-    /// Archived sessions across every project — surfaced in ⌘K when the
-    /// query matches them, so the palette also searches the archive without
-    /// opening the per-project library. Excluded from the empty-query recents.
-    private var archivedSessionItems: [PaletteItem] {
-        var items: [PaletteItem] = []
-        func walk(_ node: ProjectNode) {
-            for session in store.archivedSessions(in: node) {
-                let subtitle = "Archived · \(node.project.name)"
-                let keywords = [session.command, session.worktreeBranch]
-                    .compactMap { $0 }
-                    .joined(separator: " ")
-                items.append(PaletteItem(
-                    id: "archived:\(session.id)",
-                    kind: .session,
-                    title: session.label,
-                    subtitle: subtitle,
-                    keywords: keywords,
-                    action: { [id = session.id] in
-                        // Restore to sidebar and reveal — same as the
-                        // archive library's Restore action.
-                        store.restoreArchivedSessionToSidebar(id)
-                    }
-                ))
-            }
-            node.worktrees.forEach(walk)
-        }
-        store.displayNodes.forEach(walk)
-        return items
-    }
-
     /// Empty-query session cap: recents, not an inventory.
     private static let recentSessionLimit = 5
 
@@ -603,7 +572,6 @@ struct CommandPaletteOverlay: View {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return tieredRecents }
         let sessions = sessionItems
-        let archived = archivedSessionItems
         // Search spans the current scope's sessions plus every other
         // workspace's active/blocked/finished rows, so a query finds a
         // spinning or done session anywhere. The local-only Projects and
@@ -624,41 +592,6 @@ struct CommandPaletteOverlay: View {
             .sorted { $0.1 > $1.1 }
             .prefix(Self.maxResults)
             .map(\.0)
-        // Archived matches append after regular results so active sessions
-        // rank first, but the palette still finds archived sessions when
-        // nothing active matches (the "search archive" case).
-        if regularResults.isEmpty {
-            let archivedResults = archived
-                .compactMap { item -> (PaletteItem, Int)? in
-                    let titleScore = PaletteFuzzy.score(trimmed, in: item.title).map { $0 * 2 }
-                    let subtitleScore = item.subtitle.flatMap { PaletteFuzzy.score(trimmed, in: $0) }
-                    let keywordScore = PaletteFuzzy.score(trimmed, in: item.keywords)
-                    guard let best = [titleScore, subtitleScore, keywordScore].compactMap({ $0 }).max() else { return nil }
-                    return (item, best)
-                }
-                .sorted { $0.1 > $1.1 }
-                .prefix(Self.maxResults)
-                .map(\.0)
-            if !archivedResults.isEmpty { return Array(archivedResults) }
-        } else if !archived.isEmpty {
-            // When there are regular hits, still surface top archived hits
-            // below them (up to 5) so a narrow query that hits both doesn't
-            // hide the archive.
-            let archivedResults = archived
-                .compactMap { item -> (PaletteItem, Int)? in
-                    let titleScore = PaletteFuzzy.score(trimmed, in: item.title).map { $0 * 2 }
-                    let subtitleScore = item.subtitle.flatMap { PaletteFuzzy.score(trimmed, in: $0) }
-                    let keywordScore = PaletteFuzzy.score(trimmed, in: item.keywords)
-                    guard let best = [titleScore, subtitleScore, keywordScore].compactMap({ $0 }).max() else { return nil }
-                    return (item, best)
-                }
-                .sorted { $0.1 > $1.1 }
-                .prefix(5)
-                .map(\.0)
-            if !archivedResults.isEmpty {
-                return Array((regularResults + archivedResults).prefix(Self.maxResults))
-            }
-        }
         return Array(regularResults)
     }
 

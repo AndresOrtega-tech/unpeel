@@ -61,7 +61,7 @@ struct StartupPerformanceTests {
         let cache = StartupPresentationCache(home: home)
         let original = StartupPresentation(
             home: home.path, hostID: "host", nodes: [Self.node("project", status: .busy)],
-            pins: [:], archivedIDs: ["archive"], unreadIDs: ["session-project"]
+            pins: [:], unreadIDs: ["session-project"]
         )
         cache.save(original)
         await cache.flush()
@@ -101,12 +101,12 @@ struct StartupPerformanceTests {
     @Test
     func rowFlagsInvalidateTheirProjectButOutputPreviewsDoNot() {
         let nodes = [Self.node("first", status: .idle), Self.node("second", status: .idle)]
-        func summary(unread: Bool = false, pinned: Bool = false, archived: Bool = false,
+        func summary(unread: Bool = false, pinned: Bool = false,
                      preview: String? = nil) -> RemoteSessionSummary {
             RemoteSessionSummary(
                 id: "session-first", projectID: "first", title: "Terminal", command: "",
                 createdAtUnixMs: 1, status: .running, activity: .idle,
-                unread: unread, pinned: pinned, lastOutputPreview: preview, archived: archived
+                unread: unread, pinned: pinned, lastOutputPreview: preview
             )
         }
         func changes(_ next: RemoteSessionSummary) -> Set<String> {
@@ -120,7 +120,6 @@ struct StartupPerformanceTests {
         }
         #expect(changes(summary(unread: true)) == ["first"])
         #expect(changes(summary(pinned: true)) == ["first"])
-        #expect(changes(summary(archived: true)) == ["first"])
         #expect(changes(summary(preview: "New terminal output")).isEmpty)
     }
 

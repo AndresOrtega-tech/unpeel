@@ -1,6 +1,6 @@
 //! Read-only view of the native app's UserDefaults overlay
 //! (`com.unpeel.native`): native projects + project order, pins, per-project
-//! manual session order, title renames, and the archived set. This is what
+//! manual session order, and title renames. This is what
 //! lets the disk-fallback sidebar match the desktop when the running app
 //! build has no `/mcp/sidebar` route (or no app runs at all). Never written.
 //!
@@ -40,8 +40,6 @@ pub struct NativeOverlay {
     pub pins: HashMap<String, u64>,
     pub pinned_order: HashMap<String, Vec<String>>,
     pub titles: HashMap<String, String>,
-    pub archived: HashSet<String>,
-    pub archived_at: HashMap<String, u64>,
     pub session_order: HashMap<String, Vec<String>>,
     /// Native preset additions/edits (enabled only): (label, command).
     pub presets: Vec<(String, String)>,
@@ -297,19 +295,6 @@ pub(crate) fn from_plist(root: &plist::Value) -> Option<NativeOverlay> {
         for (id, color) in colors {
             if let Some(c) = color.as_string() {
                 overlay.project_colors.insert(id.clone(), c.to_string());
-            }
-        }
-    }
-    if let Some(archived) = dict.get("unpeel.native.archivedSessions") {
-        overlay.archived = as_string_array(archived).into_iter().collect();
-    }
-    if let Some(at) = dict
-        .get("unpeel.native.archivedAt")
-        .and_then(|v| v.as_dictionary())
-    {
-        for (id, stamp) in at {
-            if let Some(ms) = stamp.as_unsigned_integer() {
-                overlay.archived_at.insert(id.clone(), ms);
             }
         }
     }

@@ -1,7 +1,7 @@
 //! Client-side session lifecycle: spawn / stop / remove / restart-with-resume
 //! implemented against the shared on-disk contract, so any frontend (the TUI,
 //! future clients) can run sessions without the native app. The native app
-//! keeps its own richer paths (overlays, archive bookkeeping, UI carry-over);
+//! keeps its own richer paths (overlays, UI carry-over);
 //! these ops are the app-independent core:
 //!
 //! - **stop** talks only to the session's control socket (`kill` command) —
@@ -28,7 +28,7 @@ const SOCKET_IO_TIMEOUT: Duration = Duration::from_millis(1_000);
 // The session host escalates TERM→KILL within ~50ms of the kill command, so
 // this wait is really for the exited-manifest PUBLISH, which can lag well
 // past 3s on a loaded Host. Must stay under the remote Controller's 10s
-// effect timeout (remote archive/stop ride this synchronously).
+// effect timeout (remote stop rides this synchronously).
 const STOP_WAIT: Duration = Duration::from_secs(8);
 const DIR_DELETE_RETRIES: u32 = 10;
 const DIR_DELETE_RETRY_DELAY: Duration = Duration::from_millis(300);
@@ -121,15 +121,17 @@ pub fn managed_storage_path_for_session(session_id: &str) -> Option<String> {
 }
 
 /// Non-destructive stop: ask the host (via its own socket) to SIGTERM its
-/// process group, then wait for the exited manifest. The session dir — and
-/// with it the conversation — survives; restart resumes it.
+/// process group, then wait for the exited manifest. The Session stays a
+/// resumable stopped row; only its scrollback is dropped.
 pub fn stop_session(session_id: &str) -> Result<(), String> {
     let _lifecycle_lock = lock_session_lifecycle(session_id)?;
-    stop_session_unlocked(session_id)
+    stop_session_unlocked(session_id)?;
+    drop_scrollback(session_id);
+    Ok(())
 }
 
-/// Caller holds this Session's lifecycle lock. Kept separate so archive,
-/// remove, and restart can compose the same stop without recursively flocking
+/// Caller holds this Session's lifecycle lock. Kept separate so remove and
+/// restart can compose the same stop without recursively flocking
 /// the same inode (which is not a portable re-entrant lock).
 fn stop_session_unlocked(session_id: &str) -> Result<(), String> {
     let socket_result = socket_command(session_id, serde_json::json!({"type": "kill"}));
@@ -196,19 +198,10 @@ fn wait_for_exited_manifest(session_id: &str, timeout: Duration) -> bool {
     false
 }
 
-/// Archive marker in the session dir — the shared-contract home for
-/// "stopped and filed away", writable by any frontend. The native app's
-/// UserDefaults overlay predates this; readers should honor both until the
-/// app adopts the marker.
-pub const ARCHIVE_MARKER: &str = "archived.json";
-
-/// Whether this launch names a runtime with a provider-owned resume recipe.
-/// This is only the static half of archive eligibility: callers that have a
-/// Session must use [`can_archive_session`] so a CLI that exited before it
-/// created a real conversation is removed instead of being filed away.
-pub fn can_archive_command(command: &str) -> bool {
-    crate::resume::can_resume(command)
-}
+/// Legacy archive marker. Archive is gone (a stopped Session
+/// is simply a resumable stopped row); [`migrate_archived_sessions`] turns
+/// the markers older Hosts left behind into plain stopped Sessions.
+const LEGACY_ARCHIVE_MARKER: &str = "archived.json";
 
 fn managed_storage_has_resume_data(manifest: &HostedSessionManifest) -> bool {
     let Some(root) = managed_storage_for_manifest(manifest).filter(|path| path.is_dir()) else {
@@ -287,8 +280,8 @@ fn provider_transcript_has_resume_data(path: Option<&str>) -> bool {
 /// resume state: a hook-captured provider id paired with a written
 /// transcript or a real lifecycle event, or populated managed per-Session
 /// storage recorded by an older launch. A launch alone never qualifies.
-pub fn can_archive_manifest(manifest: &HostedSessionManifest) -> bool {
-    if !can_archive_command(&manifest.session.command) {
+pub fn has_resume_evidence(manifest: &HostedSessionManifest) -> bool {
+    if !crate::resume::can_resume(&manifest.session.command) {
         return false;
     }
     if managed_storage_has_resume_data(manifest) {
@@ -311,52 +304,62 @@ pub fn can_archive_manifest(manifest: &HostedSessionManifest) -> bool {
             || has_real_provider_lifecycle(&manifest.session.id))
 }
 
-/// Load and evaluate the Host-owned archive capability for one Session.
-pub fn can_archive_session(session_id: &str) -> bool {
-    load_manifest(session_id).is_some_and(|manifest| can_archive_manifest(&manifest))
+/// Load and evaluate the Host-owned resume evidence for one Session.
+pub fn session_has_resume_evidence(session_id: &str) -> bool {
+    load_manifest(session_id).is_some_and(|manifest| has_resume_evidence(&manifest))
 }
 
-/// Non-destructive stop-and-archive: stop the host and stamp the marker.
-/// The session dir (and conversation) survives; restart resumes it — and
-/// since restart replaces the dir, the marker dies with it ("restarting an
-/// archived session is bringing it back").
-pub fn archive_session(session_id: &str) -> Result<(), String> {
-    let _lifecycle_lock = lock_session_lifecycle(session_id)?;
-    // Deliberately ungated: Archive is the non-destructive stop-and-file
-    // verb for ANY session. Whether the filed conversation later offers
-    // Restore & Resume or plain Restore is decided at restore time by
-    // `can_archive_manifest`'s resume evidence — never by refusing to file.
-    stop_session_unlocked(session_id)?;
+/// A stopped Session keeps only what Resume needs — manifest, title, and
+/// provider id — never its scrollback: Resume starts a fresh terminal and
+/// never replays the old journal, and kept journals were what grew
+/// `app-sessions` into gigabytes. Truncating (rather than unlinking) keeps
+/// `output.bin` present for readers that open it unconditionally.
+fn drop_scrollback(session_id: &str) {
     let dir = session_dir(session_id);
-    if !dir.exists() {
-        return Err(format!("no session dir for {session_id}"));
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join("output.bin"))
+    {
+        let _ = file.set_len(0);
     }
-    // Stamped: this is the user-verb path (CLI / TUI archive), never a
-    // sweep — the row floats to the top of the fixed archive section.
-    let marker = serde_json::json!({ "archived_at": now_ms(), "stamped": true });
-    let tmp = dir.join(".archived.json.tmp");
-    std::fs::write(
-        &tmp,
-        serde_json::to_vec(&marker).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, dir.join(ARCHIVE_MARKER)).map_err(|e| e.to_string())?;
-    crate::state_bus::announce(
-        crate::state_bus::Change::SessionMarkers,
-        own_listener_port(),
-    );
-    Ok(())
+    let _ = std::fs::remove_file(dir.join(crate::session_host::OUTPUT_RETENTION_FILE));
 }
 
-/// Bring an archived session back to the sidebar (no restart).
-pub fn restore_session(session_id: &str) -> Result<(), String> {
-    let _lifecycle_lock = lock_session_lifecycle(session_id)?;
-    let _ = std::fs::remove_file(session_dir(session_id).join(ARCHIVE_MARKER));
-    crate::state_bus::announce(
-        crate::state_bus::Change::SessionMarkers,
-        own_listener_port(),
-    );
-    Ok(())
+/// One-time upgrade of Sessions archived by an older Host: drop the marker
+/// and the scrollback so each becomes an ordinary resumable stopped row.
+/// A marker beside a still-running manifest is left for the orphan reaper,
+/// which files it exited; the next pass migrates it.
+pub fn migrate_archived_sessions() -> usize {
+    let Ok(entries) = std::fs::read_dir(app_paths::app_sessions_root()) else {
+        return 0;
+    };
+    let mut migrated = 0;
+    for entry in entries.flatten() {
+        let marker = entry.path().join(LEGACY_ARCHIVE_MARKER);
+        if !marker.exists() {
+            continue;
+        }
+        let Some(session_id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(_lifecycle_lock) = lock_session_lifecycle(&session_id) else {
+            continue;
+        };
+        if load_manifest(&session_id).is_some_and(|m| m.state == HostedSessionState::Running) {
+            continue;
+        }
+        drop_scrollback(&session_id);
+        if std::fs::remove_file(&marker).is_ok() {
+            migrated += 1;
+        }
+    }
+    if migrated > 0 {
+        crate::state_bus::announce(
+            crate::state_bus::Change::SessionMarkers,
+            own_listener_port(),
+        );
+    }
+    migrated
 }
 
 /// Display-group assignment override (`project-override.json` in the session
@@ -540,29 +543,6 @@ pub fn provider_session_marker_at(dir: &Path) -> (Option<String>, Option<String>
         field("provider_session_id"),
         field("provider_transcript_path"),
     )
-}
-
-/// The recency stamp: `archived_at` only for USER-initiated archives.
-/// Sweep-filed sessions (`stamped: false`) return None here — they are
-/// archived, but must neither float to the top of the archive section nor
-/// linger in the visible list. A marker without the field predates it and
-/// reads as stamped.
-pub fn archive_stamp(session_id: &str) -> Option<u64> {
-    let raw = std::fs::read(session_dir(session_id).join(ARCHIVE_MARKER)).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-    if value.get("stamped").and_then(|v| v.as_bool()) == Some(false) {
-        return None;
-    }
-    value.get("archived_at")?.as_u64()
-}
-
-/// Marker read for sidebar builders: Some(archived_at) when filed.
-pub fn archived_marker(session_id: &str) -> Option<u64> {
-    let raw = std::fs::read(session_dir(session_id).join(ARCHIVE_MARKER)).ok()?;
-    serde_json::from_slice::<serde_json::Value>(&raw)
-        .ok()?
-        .get("archived_at")?
-        .as_u64()
 }
 
 /// Shared-contract title override (`title.json` in the session dir): any
@@ -1349,7 +1329,7 @@ pub fn last_activity_ms(session_id: &str, command: &str) -> Option<u64> {
         // turn — its creation time is the honest answer.
         let foreground = mtime("last-hook-event.json");
         // A child can finish long after the main Stop. Its current-generation
-        // directory changes on marker creation/removal, so unread and archive
+        // directory changes on marker creation/removal, so unread and auto-stop
         // clocks follow that finish without overwriting the foreground seed.
         let background = if dir.join("background-hooks").is_dir() {
             crate::session_host::load_manifest(session_id).and_then(|manifest| {
@@ -2029,6 +2009,21 @@ pub fn remove_session(session_id: &str) -> Result<(), String> {
     remove_session_unlocked(session_id)
 }
 
+/// Retention's Remove (`unpeel-serve` keep limit): delete a Session only if
+/// it is still stopped under its lifecycle lock, so a concurrent Resume or
+/// Reload always wins over the sweep. `Ok(false)` means it was left alone.
+pub fn remove_stopped_session(session_id: &str) -> Result<bool, String> {
+    let _lifecycle_lock = lock_session_lifecycle(session_id)?;
+    if !load_manifest(session_id)
+        .is_some_and(|manifest| manifest.state == HostedSessionState::Exited)
+    {
+        return Ok(false);
+    }
+    validate_shared_session_reference_files()?;
+    remove_session_unlocked(session_id)?;
+    Ok(true)
+}
+
 /// Caller holds this Session's lifecycle lock. Failure recovery deliberately
 /// bypasses the public preflight: even when an index became unreadable between
 /// spawn and identity transfer, the unreported replacement host must still be
@@ -2283,7 +2278,7 @@ fn agent_in_place_action(session_id: &str, shell_only_wire_verb: bool) -> Result
     // winner advances it and the later caller is rejected instead of queuing
     // a second resume line into the freshly relaunched agent.
     let snapshot = manifest(session_id)?;
-    if !can_archive_manifest(&snapshot) {
+    if !has_resume_evidence(&snapshot) {
         return Err(format!(
             "session {session_id} has no resumable provider conversation"
         ));
@@ -2358,7 +2353,7 @@ pub fn resume_session(
         return Err(format!("session {session_id} is still running"));
     }
     // Deliberately no resume-evidence gate at the execution layer: UI
-    // surfaces advertise Resume from evidence (`can_archive_manifest`), but
+    // surfaces advertise Resume from evidence (`has_resume_evidence`), but
     // an explicitly requested replacement falls back to the resume planner's
     // fresh/continue-last recipes — a stale or version-skewed Controller
     // gets a relaunch, never a hard failure.
@@ -2553,9 +2548,9 @@ mod phone_fit_marker_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_mcp_enabled_from_app_state, can_archive_command, initial_text_payload,
-        legacy_pinned_group_id, lifecycle_lock_target_at, merge_project_sibling_order,
-        mixed_session_order_from, prepare_legacy_pin_groups, provider_transcript_has_resume_data,
+        browser_mcp_enabled_from_app_state, initial_text_payload, legacy_pinned_group_id,
+        lifecycle_lock_target_at, merge_project_sibling_order, mixed_session_order_from,
+        prepare_legacy_pin_groups, provider_transcript_has_resume_data,
         remove_migrated_pin_entries, remove_unreferenced_legacy_pin_groups,
         rewrite_app_state_session_references, rewrite_session_order_references_at,
         rewrite_session_order_value, set_group_pinned_in_state,
@@ -2598,14 +2593,6 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(raw["project_colors"], serde_json::json!({}));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn archive_static_gate_requires_a_runtime_resume_recipe() {
-        assert!(!can_archive_command(""));
-        assert!(can_archive_command("claude --model opus"));
-        assert!(!can_archive_command("my-custom-agent --serve"));
-        assert!(!can_archive_command("bash"));
     }
 
     #[test]

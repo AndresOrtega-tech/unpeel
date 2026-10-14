@@ -314,7 +314,7 @@ main `last-hook-event.json`. The Host reconciles the markers on rescan, includin
 after a restart or missed POST; duplicate/unknown stops are harmless. A new
 managed runtime generation cannot inherit its predecessor's children.
 The current generation directory's modification time also advances the shared
-unread, Recent, and archive clock when the last child finishes.
+unread, Recent, and auto-stop clock when the last child finishes.
 
 Background leases use the existing five-minute inactivity fallback: output
 changes may maintain hook-established work, but cannot create or revive it.
@@ -384,7 +384,7 @@ restart, so test newly added fallback support in a newly created Session.
 
 ### Recent ordering and automatic cleanup
 
-Recent ordering and auto-stop/archive consume the same provider-aware
+Recent ordering and auto-stop consume the same provider-aware
 lifecycle timestamp. Hook-capable tools use `last-hook-event.json`; raw
 `output.bin` growth is never a fallback for them because attaching, resizing,
 and idle TUI repaints can append bytes without real work. Hookless tools prefer

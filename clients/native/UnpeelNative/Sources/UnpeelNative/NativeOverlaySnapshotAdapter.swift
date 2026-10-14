@@ -15,8 +15,6 @@ enum NativeOverlaySnapshotAdapter {
         "unpeel.sidebar.pins",
         "unpeel.native.sessionTitles",
         "unpeel.native.projectFolderColors",
-        "unpeel.native.archivedSessions",
-        "unpeel.native.archivedAt",
         "unpeel.native.presets",
     ]
 

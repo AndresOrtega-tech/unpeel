@@ -27,6 +27,7 @@ def body(case):
     home = case.home
     home.project("p", "unpeel", "/tmp")
     home.session("s1", label="first session", project_id="p")
+    home.session("s-live", label="live session", command="cat", project_id="p", running=True)
 
     token = home.pair_device()
     mobile = home.reserve_mobile_port()
@@ -88,16 +89,17 @@ def body(case):
     with open(home.path("app-ports"), "a") as handle:
         handle.write(f"{peer_port}\n")
 
-    # Archiving writes a shared marker — the peer must be told.
-    run_cli(home, ["archive", "s1"])
+    # Stopping takes a live Session down — the peer must be told.
+    stopped = run_cli(home, ["stop", "s-live"], timeout=45)
     deadline = time.time() + 3
     while time.time() < deadline and not heard:
         time.sleep(0.1)
-    case.check("a write from the CLI announces itself", bool(heard), str(heard)[:160])
+    case.check("a write from the CLI announces itself", stopped.returncode == 0 and bool(heard),
+               stopped.stderr[:160] + str(heard)[:160])
     if heard:
         case.check(
             "the ping names what changed",
-            "session-markers" in heard[0],
+            '"change":"lifecycle"' in heard[0],
             heard[0][:200],
         )
 
@@ -107,6 +109,7 @@ def body(case):
                 ("session-markers", "lifecycle", "app-state", "order")
                 if f'"change":"{k}"' in note}
 
+    heard.clear()
     home.preset(label="cat", command="cat")
     started = run_cli(home, ["new", "--preset", "cat", "--project", "p"])
     case.check("spawn returns", started.returncode == 0, started.stderr[:120])

@@ -6,7 +6,8 @@ final class TerminalPaneClosePolicyTests: XCTestCase {
         XCTAssertEqual(
             terminalPaneCloseAction(
                 for: .launcher(projectID: "project"),
-                canArchiveSession: false
+                canStopSession: false,
+                isStoppedResumable: false
             ),
             .detachPane
         )
@@ -16,19 +17,32 @@ final class TerminalPaneClosePolicyTests: XCTestCase {
         XCTAssertEqual(
             terminalPaneCloseAction(
                 for: .session(id: "shell"),
-                canArchiveSession: false
+                canStopSession: false,
+                isStoppedResumable: false
             ),
             .removeSession("shell")
         )
     }
 
-    func testResumableAgentRequiresArchiveConfirmation() {
+    func testLiveResumableAgentRequiresStopConfirmation() {
         XCTAssertEqual(
             terminalPaneCloseAction(
                 for: .session(id: "agent"),
-                canArchiveSession: true
+                canStopSession: true,
+                isStoppedResumable: false
             ),
-            .confirmArchive("agent")
+            .confirmStop("agent")
+        )
+    }
+
+    func testStoppedResumableAgentRequiresRemoveConfirmation() {
+        XCTAssertEqual(
+            terminalPaneCloseAction(
+                for: .session(id: "agent"),
+                canStopSession: false,
+                isStoppedResumable: true
+            ),
+            .confirmRemove("agent")
         )
     }
 }

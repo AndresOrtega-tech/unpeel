@@ -122,7 +122,6 @@ impl ControllerHostRuntime {
         let needs_catalog = matches!(
             (request.method.as_str(), request.path.as_str()),
             ("GET", "/mobile/bootstrap")
-                | ("GET", "/mobile/archive")
                 | ("POST", "/mobile/sessions")
                 | ("POST", "/mobile/project-organization")
                 | ("POST", "/mobile/presets")
@@ -231,7 +230,6 @@ struct ProjectRecord {
 struct DiskCatalog {
     host_id: String,
     bootstrap: Value,
-    archives: HashMap<String, Vec<Value>>,
     projects: Vec<HostCreateProject>,
     presets: Vec<HostCreatePreset>,
 }
@@ -299,13 +297,6 @@ impl DiskCatalog {
             .filter(|project| !folder_ids.contains(&project.id))
             .enumerate()
         {
-            let archived_count = manifests
-                .iter()
-                .filter(|manifest| {
-                    effective_project_id(manifest, &known_ids) == project.id
-                        && crate::session_ops::archived_marker(&manifest.session.id).is_some()
-                })
-                .count();
             // sortOrder is the DISPLAY rank (array order and field agree),
             // never the raw file value a shared-order drag may contradict.
             let mut value = json!({
@@ -314,7 +305,6 @@ impl DiskCatalog {
                 "path": project.path,
                 "sortOrder": display_rank,
                 "mcpBlocked": false,
-                "archivedSessionCount": archived_count,
                 "pinned": project.pinned,
             });
             if let Some(object) = value.as_object_mut() {
@@ -370,11 +360,6 @@ impl DiskCatalog {
         let activity_log =
             crate::activity_log::ActivityLogStore::load_default().unwrap_or_default();
         let mut sessions = Vec::new();
-        let mut archives: HashMap<String, Vec<Value>> = wire_projects
-            .iter()
-            .filter_map(|project| project.get("id")?.as_str().map(str::to_owned))
-            .map(|id| (id, Vec::new()))
-            .collect();
         let mut manifests = manifests;
         let host_owner_principal_id = crate::state::host_owner_principal_id(&host_id);
         manifests.sort_by(|left, right| {
@@ -386,13 +371,11 @@ impl DiskCatalog {
         });
         for manifest in &manifests {
             let project_id = effective_project_id(manifest, &known_ids);
-            let archived = crate::session_ops::archived_marker(&manifest.session.id).is_some();
-            let resumable = crate::session_ops::can_archive_manifest(manifest);
+            let resumable = crate::session_ops::has_resume_evidence(manifest);
             let summary = session_summary_with_menu_attention(
                 manifest,
                 &project_id,
                 pinned.contains(&manifest.session.id),
-                archived,
                 resumable,
                 &host_owner_principal_id,
                 activity.get(&manifest.session.id),
@@ -404,15 +387,8 @@ impl DiskCatalog {
                     .filter(|entry| entry.kind == crate::activity_log::ActivityLogKind::Alert),
                 menu_attention_detection,
             );
-            if archived {
-                archives
-                    .entry(project_id.clone())
-                    .or_default()
-                    .push(summary.clone());
-            }
             // The bootstrap includes the same inactive preview as the Host
-            // sidebar. Stopped and archived rows share its limit; archive
-            // status still overrides pin/manual placement and stays last.
+            // sidebar.
             sessions.push(summary);
         }
         crate::session_ops::attach_mixed_session_order_fields(&mut wire_projects);
@@ -423,9 +399,6 @@ impl DiskCatalog {
             .collect();
         sort_wire_sessions(&mut sessions, &wire_projects, &session_orders);
         retain_wire_sidebar_inactive_window(&mut sessions, inactive_preview_limit);
-        for archived in archives.values_mut() {
-            sort_wire_sessions(archived, &wire_projects, &session_orders);
-        }
         let mut workspace_settings = wire_workspace_settings(&state);
         workspace_settings["availableAgents"] = agents;
         workspace_settings["mcpShimPath"] =
@@ -472,7 +445,6 @@ impl DiskCatalog {
                 "hostTintHue": host_tint_hue,
                 "hostDeviceKind": if cfg!(target_os = "linux") { "linux" } else { "unknown" },
             }),
-            archives,
             projects: create_projects,
             presets: create_presets,
         })
@@ -486,7 +458,6 @@ impl DiskCatalog {
         bootstrap.protocol = disk_protocol();
         HostRouteContext {
             bootstrap: Some(bootstrap),
-            archived_sessions_by_project: self.archives.clone(),
         }
     }
 
@@ -1968,7 +1939,6 @@ fn session_summary(
     manifest: &HostedSessionManifest,
     project_id: &str,
     pinned: bool,
-    archived: bool,
     resumable: bool,
     host_owner_principal_id: &str,
     activity: Option<&Value>,
@@ -1978,7 +1948,6 @@ fn session_summary(
         manifest,
         project_id,
         pinned,
-        archived,
         resumable,
         host_owner_principal_id,
         activity,
@@ -1992,7 +1961,6 @@ fn session_summary_with_menu_attention(
     manifest: &HostedSessionManifest,
     project_id: &str,
     pinned: bool,
-    archived: bool,
     resumable: bool,
     host_owner_principal_id: &str,
     activity: Option<&Value>,
@@ -2006,7 +1974,6 @@ fn session_summary_with_menu_attention(
         manifest.session.created_at,
         (!running).then_some(manifest.updated_at),
     )
-    .max(crate::session_ops::archive_stamp(&manifest.session.id).unwrap_or(0))
     .max(latest_alert.map(|entry| entry.at).unwrap_or(0));
     let claimed_unread = activity
         .and_then(|value| value.get("unread"))
@@ -2101,12 +2068,14 @@ fn session_summary_with_menu_attention(
             "fork": false,
             "appendSystemContext": false,
             "notifyWhenDone": false,
-            // Evidence-based OFFER (matching the local sidebar and the
-            // auto-stop sweep); the archive route itself stays compatible
-            // for explicit requests.
-            "archive": resumable,
+            // Host resume evidence: Stop leaves a resumable stopped row
+            // (otherwise Controllers offer Remove).
+            "resumable": resumable,
+            // Archive is gone; older Controllers read `false` and offer
+            // plain Stop.
+            "archive": false,
         },
-        "archived": archived,
+        "archived": false,
     });
     // A retained final observation is useful in Host diagnostics, but it is
     // never advertised as the currently active runtime after the PTY exits.
@@ -2164,10 +2133,9 @@ fn session_summary_with_menu_attention(
 }
 
 /// Put each Host project's wire sessions in the order its sidebar advertises.
-/// Non-archived pins remain their explicit first section. Live rows come next
-/// (Recent lifecycle order in date mode, manual order in custom mode), then
-/// naturally stopped rows, with archives always last and newest-filed first.
-/// The inactive preview later caps both stopped sections together. Grouping
+/// Pins remain their explicit first section. Live rows come next (Recent
+/// lifecycle order in date mode, manual order in custom mode), then stopped
+/// rows, newest first; the inactive preview later caps those. Grouping
 /// the flat wire array by project is harmless to clients and makes its
 /// filtered order unambiguous.
 fn sort_wire_sessions(
@@ -2211,23 +2179,6 @@ fn sort_wire_sessions(
             )
             .then_with(|| left_project.cmp(right_project))
             .then_with(|| {
-                let archived = |value: &Value| {
-                    value
-                        .get("archived")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                };
-                let left_archived = archived(left);
-                let right_archived = archived(right);
-                if left_archived != right_archived {
-                    return left_archived.cmp(&right_archived);
-                }
-                if left_archived {
-                    return number(right, "updatedAtUnixMs")
-                        .cmp(&number(left, "updatedAtUnixMs"))
-                        .then_with(|| string(left, "id").cmp(string(right, "id")));
-                }
-
                 let left_pinned = left.get("pinned").and_then(Value::as_bool).unwrap_or(false);
                 let right_pinned = right
                     .get("pinned")
@@ -2280,7 +2231,7 @@ fn sort_wire_sessions(
 
 /// Resolve the inactive-preview setting from its compatibility key. Missing
 /// or junk values use the five-row default; explicit zero hides every
-/// unpinned stopped or archived row.
+/// unpinned stopped row.
 fn wire_sidebar_inactive_window(state: &Value) -> usize {
     const OPTIONS: [u64; 6] = [0, 3, 5, 10, 15, 25];
     match state.get("sidebar_stopped_limit").and_then(Value::as_u64) {
@@ -2289,17 +2240,11 @@ fn wire_sidebar_inactive_window(state: &Value) -> usize {
     }
 }
 
-/// Keep every live row and non-archived pin, then at most the configured
-/// number of stopped and archived previews combined per project. Unread rows
-/// stay visible past that window. `sort_wire_sessions` has already put natural
-/// stops before the contiguous newest-filed archive section.
+/// Keep every live row and pin, then at most the configured number of
+/// stopped previews per project. Unread rows stay visible past that window.
 fn retain_wire_sidebar_inactive_window(sessions: &mut Vec<Value>, inactive_window: usize) {
     let mut inactive_by_project: HashMap<String, usize> = HashMap::new();
     sessions.retain(|session| {
-        let archived = session
-            .get("archived")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         let pinned = session
             .get("pinned")
             .and_then(Value::as_bool)
@@ -2309,7 +2254,7 @@ fn retain_wire_sidebar_inactive_window(sessions: &mut Vec<Value>, inactive_windo
             .get("unread")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if (running || pinned) && !archived {
+        if running || pinned {
             return true;
         }
         let project = session
@@ -2635,10 +2580,11 @@ fn organization(request: &ControllerRequest) -> (u16, Value) {
             return (500, json!({ "error": message }));
         }
     }
+    // Archive is gone: an older Controller's `archived: true` is its Stop,
+    // and `archived: false` (Restore) has nothing left to undo.
     let result = match archived {
-        Some(true) => crate::session_ops::archive_session(session_id),
-        Some(false) => crate::session_ops::restore_session(session_id),
-        None => Ok(()),
+        Some(true) => crate::session_ops::stop_session(session_id),
+        Some(false) | None => Ok(()),
     };
     match result {
         Ok(()) => (200, json!({ "ok": true })),
@@ -2767,7 +2713,6 @@ mod tests {
             "project-1",
             false,
             false,
-            false,
             "host-owner:test",
             None,
             None,
@@ -2782,7 +2727,6 @@ mod tests {
         let summary = session_summary(
             &managed,
             "project-1",
-            false,
             false,
             true,
             "host-owner:test",
@@ -2799,7 +2743,6 @@ mod tests {
             &returned_to_shell,
             "project-1",
             false,
-            false,
             true,
             "host-owner:test",
             None,
@@ -2813,7 +2756,6 @@ mod tests {
         let summary = session_summary(
             &launch_pending,
             "project-1",
-            false,
             false,
             true,
             "host-owner:test",
@@ -2831,7 +2773,6 @@ mod tests {
             &old_host,
             "project-1",
             false,
-            false,
             true,
             "host-owner:test",
             None,
@@ -2845,7 +2786,6 @@ mod tests {
         let summary = session_summary(
             &blank,
             "project-1",
-            false,
             false,
             false,
             "host-owner:test",
@@ -2871,7 +2811,6 @@ mod tests {
         let summary = session_summary(
             &manifest,
             "project-1",
-            false,
             false,
             false,
             "host-owner:test",
@@ -2901,7 +2840,6 @@ mod tests {
             "project-1",
             false,
             false,
-            false,
             "host-owner:test",
             None,
             Some(&alert),
@@ -2919,7 +2857,6 @@ mod tests {
             "project-1",
             false,
             false,
-            false,
             "host-owner:test",
             None,
             None,
@@ -2934,7 +2871,6 @@ mod tests {
         let summary = session_summary(
             &manifest,
             "project-1",
-            false,
             false,
             false,
             "host-owner:test",
@@ -2960,7 +2896,6 @@ mod tests {
             "project-1",
             false,
             false,
-            false,
             "host-owner:test",
             None,
             None,
@@ -2970,7 +2905,6 @@ mod tests {
         let disabled = session_summary_with_menu_attention(
             &manifest,
             "project-1",
-            false,
             false,
             false,
             "host-owner:test",
@@ -3056,7 +2990,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_sidebar_caps_stopped_and_archived_rows_together_per_project() {
+    fn wire_sidebar_caps_stopped_rows_per_project() {
         let mut sessions = vec![json!({
             "id": "live",
             "projectID": "project",
@@ -3066,28 +3000,17 @@ mod tests {
         })];
         for updated in 10..17 {
             sessions.push(json!({
-                "id": format!("archived-{updated}"),
+                "id": format!("stopped-{updated}"),
                 "projectID": "project",
                 "status": "exited",
-                "archived": true,
                 "pinned": false,
                 "updatedAtUnixMs": updated,
             }));
         }
         sessions.push(json!({
-            "id": "naturally-stopped",
-            "projectID": "project",
-            "status": "exited",
-            "archived": false,
-            "pinned": false,
-            "capabilities": { "archive": false },
-            "updatedAtUnixMs": 3,
-        }));
-        sessions.push(json!({
             "id": "unread-old",
             "projectID": "project",
             "status": "exited",
-            "archived": true,
             "unread": true,
             "pinned": false,
             "updatedAtUnixMs": 2,
@@ -3106,11 +3029,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "live",
-                "naturally-stopped",
-                "archived-16",
-                "archived-15",
-                "archived-14",
-                "archived-13",
+                "stopped-16",
+                "stopped-15",
+                "stopped-14",
+                "stopped-13",
+                "stopped-12",
                 "unread-old",
             ]
         );
@@ -3119,7 +3042,6 @@ mod tests {
             "id": "unread-newest",
             "projectID": "project",
             "status": "exited",
-            "archived": true,
             "unread": true,
             "pinned": false,
             "updatedAtUnixMs": 100,
@@ -3129,7 +3051,6 @@ mod tests {
                 "id": format!("read-{updated}"),
                 "projectID": "project",
                 "status": "exited",
-                "archived": true,
                 "unread": false,
                 "pinned": false,
                 "updatedAtUnixMs": updated,
@@ -3144,7 +3065,7 @@ mod tests {
         assert_eq!(
             newest_unread.len(),
             5,
-            "unread archives within the window count toward it"
+            "unread stopped rows within the window count toward it"
         );
     }
 

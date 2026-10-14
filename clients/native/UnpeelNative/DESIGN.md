@@ -177,17 +177,17 @@ Tailwind hues (theme.ts:32-54).
   - title truncates with ellipsis; optional branch chip (mono 10px, radius 7, padding 0 6px,
     bg fg-10%); unread = 7px `#60a5fa` dot inline after the title
   - trailing meta: relative age ("now/5m/3h/2d", 9px @ 0.7); on hover the age is replaced by
-    tag + archive icon buttons (22×22 radius 6, 13px icons); archive click arms a "Confirm"
-    state: auto-width pill, bg `#ef4444` @ 15% (25% hover), text `#ef4444`, 11px/500
-    (ProjectItem.svelte:2682-2746)
+    the row action (22×22 radius 6, 13px icons): Stop for a live resumable session, X
+    (Remove) otherwise, with Resume to its left when the row has one. Stopping a working
+    session swaps the row to an inline "Stop?" confirm: auto-width pills, destructive pill
+    bg `#ef4444` @ 15% (25% hover), text `#ef4444`, 11px/500
   - holding ⌘ shows `⌘1…⌘9` shortcut hints in place of the age (9px/500 @ 0.7)
   - tag chip: GlassTag sm — 10px/650, radius 6, bg = tagColor 72% + white 28%, text =
     `--background`
-- Archived sessions never render as a sidebar subsection. Right-click the
-  owning project and choose `Archived (N)` to open the project-scoped
-  library in the main pane. Archiving stops the hosted terminal but keeps the
-  session directory; the library offers Resume, Restore to sidebar, transcript
-  copy, and permanent removal.
+- Stopping a session keeps its row: it joins the stopped section below the live
+  rows (capped by the "Stopped sessions to keep" setting, default 5; the Host
+  removes older stopped rows, except pinned and unread ones) and offers
+  Resume. There is no archive section or library.
 - "Worktrees" link row (when worktrees enabled; ProjectItem.svelte:1362-1383, 2087-2141):
   same session-row geometry; branch-split icon @ 0.8 opacity (spinner when any worktree
   busy; 6px `#f59e0b` attention dot top-right), label "Worktrees" 12px/600, count badge

@@ -469,7 +469,7 @@ fn platform_session_organization(
     }
 
     // The disk Host's organization contract resolves the resource before it
-    // validates fields, then validates title/pin/archive/project before the
+    // validates fields, then validates title/pin/stop/project before the
     // platform field. Repeat that pure preflight here before removing the
     // native field, otherwise an adapter-free compound request could mutate
     // ordinary Host state before returning 501.

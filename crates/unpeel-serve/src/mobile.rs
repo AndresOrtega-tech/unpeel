@@ -200,8 +200,8 @@ const MAX_CONNECTIONS_PER_PEER: usize = 16;
 /// How often the accept loop looks for expired unauthenticated connections.
 const LEDGER_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
 /// The TUI main loop publishes the phone-facing snapshot here every rescan:
-/// pre-built bootstrap arrays plus the project-scoped archive catalog, all in
-/// the Swift wire dialect and desktop sidebar order.
+/// pre-built bootstrap arrays in the Swift wire dialect and desktop sidebar
+/// order.
 pub type SharedSnapshot = Arc<Mutex<crate::sessions::MobileSnapshot>>;
 /// session id → when a phone last resized it via this server (drives the
 /// "Resized for mobile" tag in the TUI preview).
@@ -1558,12 +1558,6 @@ fn handle_with_effects(
         platform_adapters.decorate_protocol(&mut context.protocol);
         Some(HostRouteContext {
             bootstrap: Some(context),
-            archived_sessions_by_project: HashMap::new(),
-        })
-    } else if request.method == "GET" && request.path == "/mobile/archive" {
-        snapshot.lock().ok().map(|guard| HostRouteContext {
-            bootstrap: None,
-            archived_sessions_by_project: guard.archived_sessions_by_project.clone(),
         })
     } else {
         None
@@ -1671,9 +1665,11 @@ fn handle_with_effects(
                 Some(serde_json::Value::Bool(value)) => Some(*value),
                 Some(_) => return (400, error_body("pinned must be a boolean")),
             };
-            let archived = match body.get("archived") {
-                None | Some(serde_json::Value::Null) => None,
-                Some(serde_json::Value::Bool(value)) => Some(*value),
+            // Archive is gone: an older Controller's `archived: true` is its
+            // Stop, and `archived: false` (Restore) has nothing to undo.
+            let legacy_stop = match body.get("archived") {
+                None | Some(serde_json::Value::Null) => false,
+                Some(serde_json::Value::Bool(value)) => *value,
                 Some(_) => return (400, error_body("archived must be a boolean")),
             };
             let project_id = match body.get("projectID") {
@@ -1711,7 +1707,7 @@ fn handle_with_effects(
             // Preserve the shipped Host resource/effect ordering when no
             // native adapter is live: resolve and type-check the Session
             // first, then reject the platform-only field before any shared
-            // title/pin/archive/project write can land. A registration can
+            // title/pin/project/stop write can land. A registration can
             // still disappear after this preflight; that later callback
             // failure is effect-unknown and Controllers must refresh.
             if notify_when_done.is_some()
@@ -1749,7 +1745,7 @@ fn handle_with_effects(
             }
             if title.is_none()
                 && pinned.is_none()
-                && archived.is_none()
+                && !legacy_stop
                 && project_id.is_none()
                 && notify_when_done.is_none()
             {
@@ -1758,10 +1754,10 @@ fn handle_with_effects(
                 return (200, r#"{"ok":true}"#.into());
             }
 
-            // This v1 route spans app-state.json, title.json, and the archive
-            // marker/control socket, so it cannot be a cross-file transaction.
-            // Put the fallible shared-state placement/pin preconditions first:
-            // if either fails, title/archive are untouched. Once placement,
+            // This v1 route spans app-state.json, title.json, and the control
+            // socket, so it cannot be a cross-file transaction. Put the
+            // fallible shared-state placement/pin preconditions first: if
+            // either fails, title/stop are untouched. Once placement,
             // pin, or title lands, any later failure is effect-unknown;
             // Controllers must refresh Host state before deciding whether to
             // retry and must not manufacture a fresh request id blindly.
@@ -1799,28 +1795,15 @@ fn handle_with_effects(
                     );
                 }
             }
-            match archived {
-                Some(true) => {
-                    if let Err(e) = unpeel_core::session_ops::archive_session(&session_id) {
-                        return (
-                            500,
-                            error_body(&format!(
-                                "organization update effect unknown; refresh Host state: {e}"
-                            )),
-                        );
-                    }
+            if legacy_stop {
+                if let Err(e) = unpeel_core::session_ops::stop_session(&session_id) {
+                    return (
+                        500,
+                        error_body(&format!(
+                            "organization update effect unknown; refresh Host state: {e}"
+                        )),
+                    );
                 }
-                Some(false) => {
-                    if let Err(e) = unpeel_core::session_ops::restore_session(&session_id) {
-                        return (
-                            500,
-                            error_body(&format!(
-                                "organization update effect unknown; refresh Host state: {e}"
-                            )),
-                        );
-                    }
-                }
-                None => {}
             }
             // This remains a Host operation: shared Host semantics land first,
             // then only the platform-owned notification preference crosses a
@@ -4089,10 +4072,6 @@ non-ephemeral ports — a product regression, not a port race. Attempts: {failur
                     { "id": "conformance-remove" },
                 ],
             }),
-            archived_sessions_by_project: HashMap::from([(
-                "conformance-project".into(),
-                Vec::new(),
-            )]),
             create_presets: Vec::new(),
         }));
         let (mark_read, _receiver) = std::sync::mpsc::channel();
@@ -4201,17 +4180,6 @@ non-ephemeral ports — a product regression, not a port race. Attempts: {failur
                         .and_then(|v| v.as_str())
                         .is_some_and(|id| !id.is_empty()));
                 }
-            }
-            if case.id == "archive.known-empty" {
-                let response: serde_json::Value =
-                    serde_json::from_str(&body).expect("archive response json");
-                assert_eq!(
-                    response,
-                    serde_json::json!({
-                        "projectID": "conformance-project",
-                        "sessions": [],
-                    })
-                );
             }
         }
     }

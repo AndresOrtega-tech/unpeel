@@ -81,10 +81,7 @@ coverage; an adapter-free headless Host still omits them and answers 404.
 Session
 creation, title organization, Session and plain-group pinning, in-place Resume
 Agent, and lifecycle stop/terminal-restart/remove now have real headless effects and common
-conformance. Archive listing is a shared
-router operation too: both adapters use the same validation/envelope, and
-`unpeel serve` publishes every archived row in native-compatible newest-first
-project buckets. Transcript Markdown, artifact list/read/delete, and the typed
+conformance. Transcript Markdown, artifact list/read/delete, and the typed
 screenshot request work on both Host implementations. Original artifact byte
 ranges now use the shared no-follow reader; positive `max_dim` thumbnail
 generation remains a native in-memory ImageIO enrichment sourced only from
@@ -95,7 +92,7 @@ shared Host router.
 The shared router lives in `unpeel-core::controller_api`. It defines the
 transport-neutral authenticated request/response envelope (including binary
 bodies), owns bootstrap protocol metadata, and owns read-only terminal metrics
-plus transcript Markdown, archived-session listing, raw terminal write/resize,
+plus transcript Markdown, raw terminal write/resize,
 typed screenshot requests, read receipts, and artifact
 list/read/resumable-upload/delete. It also owns the typed headless lifecycle
 effect boundary for shell-only Resume Agent, terminal/session restart, and
@@ -146,8 +143,7 @@ failure `500`, and `{ "ok": true }` on success. Per-session cross-process
 locks serialize lifecycle changes. Legacy
 terminal/session restart re-points title/custom-title, Session pin metadata
 and its `pinned_at` timestamp, manual order, Sessions MCP grant and directional
-write approvals, and Browser approvals; archive state is intentionally not
-carried. The additive `resume_agent` action instead keeps all of that state and
+write approvals, and Browser approvals. The additive `resume_agent` action instead keeps all of that state and
 the existing Session/PTY. It verifies that the original owned interactive login
 shell has the foreground and that no retained expected runtime,
 stopped/background job, or different recognized runtime remains, then injects
@@ -394,7 +390,7 @@ at most once.
 
 The paired-direct native slice currently covers bootstrap/sidebar state,
 output, input, desktop fit/clear, mark-read, Session create/lifecycle and
-organization, transcript/archive reads, and artifact operations. Remote Host
+organization, transcript reads, and artifact operations. Remote Host
 settings and preset editing, native SSH, pinned
 TLS/WSS, target Link identity/rendezvous, and physical two-Mac/release QA
 remain. (The TUI's own Direct/Link selection is moot: the TUI was removed

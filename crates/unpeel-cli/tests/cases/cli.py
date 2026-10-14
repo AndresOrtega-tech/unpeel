@@ -76,16 +76,43 @@ def body(case):
         denied.stdout[:120] + denied.stderr[:200],
     )
 
+    # Stop leaves a resumable stopped row: the Session stays listed with its
+    # manifest and title, only its scrollback is dropped.
+    output_path = home.path("app-sessions", session_id, "output.bin")
+    output_before = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+    stopped = run_cli(home, ["stop", short], timeout=45)
+    listed = run_cli(home, ["ls", "--json"])
+    try:
+        stopped_rows = {row["id"]: row for row in json.loads(listed.stdout)}
+    except (ValueError, KeyError, TypeError):
+        stopped_rows = {}
     case.check(
-        "archive writes the shared marker",
-        run_cli(home, ["archive", short]).returncode == 0
-        and home.has_marker(session_id, "archived.json"),
+        "stop leaves the session listed as stopped",
+        stopped.returncode == 0
+        and stopped_rows.get(session_id, {}).get("status") == "exited"
+        and home.manifests().get(session_id, {}).get("state") == "exited"
+        and "archived" not in stopped_rows.get(session_id, {}),
+        stopped.stderr[:200] + listed.stdout[:300],
     )
     case.check(
-        "restore clears it",
-        run_cli(home, ["restore", short]).returncode == 0
+        "stop drops the session's scrollback",
+        output_before > 0
+        and os.path.exists(output_path)
+        and os.path.getsize(output_path) == 0
+        and not home.has_marker(session_id, "output-retention.json")
         and not home.has_marker(session_id, "archived.json"),
+        f"before={output_before} after="
+        f"{os.path.getsize(output_path) if os.path.exists(output_path) else None}",
     )
+    for verb in ("archive", "restore"):
+        removed_verb = run_cli(home, [verb, short])
+        case.check(
+            f"`unpeel {verb}` is no longer a command",
+            removed_verb.returncode == 2
+            and f'unknown command "{verb}"' in removed_verb.stderr
+            and not home.has_marker(session_id, "archived.json"),
+            f"rc={removed_verb.returncode} {removed_verb.stderr[:160]}",
+        )
 
     # A current live managed Host whose agent returned to the shell receives
     # Resume Agent and keeps the same Session/PTY identity.

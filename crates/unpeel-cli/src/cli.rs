@@ -42,7 +42,7 @@ unpeel — run and steer CLI agent sessions
   unpeel logs <id> [--lines N] [--follow]
   unpeel wait <id> [--idle] [--text S] [--timeout SECONDS]
   unpeel resume <id>               returned agent: resume in place; stopped: resume terminal
-  unpeel stop|archive|restore|rm <id>
+  unpeel stop|rm <id>
   unpeel transcript <id> [--entries N] [--markdown]
   unpeel open <path|resource> [--with APP] [--kind KIND] [--json]
   unpeel settings list|get <key>|set <key> <value> [--json]
@@ -172,7 +172,6 @@ fn session_json(row: &SessionRow) -> serde_json::Value {
         "project_id": row.project_id,
         "cwd": row.cwd,
         "pinned": row.pinned,
-        "archived": row.archived,
         "created_at": row.created_at,
     })
 }
@@ -386,7 +385,9 @@ fn logs(args: &Args) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(200));
         let current = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(offset);
         if current <= offset {
-            if unpeel_core::session_ops::archived_marker(&row.id).is_some() {
+            if unpeel_core::session_host::load_manifest(&row.id).is_none_or(|manifest| {
+                manifest.state == unpeel_core::session_host::HostedSessionState::Exited
+            }) {
                 return Ok(());
             }
             continue;
@@ -726,7 +727,7 @@ fn serve() -> Result<(), String> {
 const HOSTS_USAGE: &str = "usage: unpeel hosts prune [--json]
 
 Terminate leftover per-process session hosts in this workspace whose session
-is already filed (exited or archived) but whose host process never exited.
+is already exited but whose host process never did.
 Runs the same reap the Host service performs at startup and on a slow timer.
 Only a provably-identical recorded host process (pid + start time) is signaled,
 never the shared PTY core, never by name match. Prints what it reaped.";
@@ -977,12 +978,6 @@ pub fn run(args: &[String]) -> i32 {
         "stop" => reference_arg()
             .and_then(|reference| resolve(&reference))
             .and_then(|row| unpeel_core::session_ops::stop_session(&row.id).map(|_| 0)),
-        "archive" => reference_arg()
-            .and_then(|reference| resolve(&reference))
-            .and_then(|row| unpeel_core::session_ops::archive_session(&row.id).map(|_| 0)),
-        "restore" => reference_arg()
-            .and_then(|reference| resolve(&reference))
-            .and_then(|row| unpeel_core::session_ops::restore_session(&row.id).map(|_| 0)),
         "rm" | "remove" | "close" => reference_arg()
             .and_then(|reference| resolve(&reference))
             .and_then(|row| unpeel_core::session_ops::remove_session(&row.id).map(|_| 0)),

@@ -152,6 +152,12 @@ class LocalHostClient:
 def seed_conformance_home(root):
     home = Home(root)
     home.project("conformance-project", "Conformance Project", "/tmp")
+    # Nine stopped fixtures share one project: keep them all past the Host's
+    # stopped-session retention (default keep limit 5 per group).
+    state = home.state()
+    state["sidebar_stopped_limit"] = 25
+    with open(home.path("app-state.json"), "w") as handle:
+        json.dump(state, handle, indent=2)
     home.preset("Claude", "claude", preset_id="conformance-preset")
     # Controller-assisted pairing exists only after one Controller already
     # trusts the Host. Seed that ordinary precondition so the worker owns a

@@ -171,16 +171,17 @@ Host-routed binding and must never fall back to a local spawn.
 
 Pane-layout operations do not mutate Host organization or lifecycle.
 **Detach Pane** and **Exit Multi-Pane View** must not move a Session between
-projects/groups, stop it, archive it, restart it, or close it. The Host-backed
+projects/groups, stop it, restart it, or close it. The Host-backed
 Sessions continue independently and their ordinary sidebar rows reappear when
 the view no longer collapses them under its representative row.
 
 ⌘W is intentionally a Session lifecycle command, not a pane-layout verb. Like
 Ghostty's active-surface close, it targets the focused pane (including a solo
 terminal): an empty launcher detaches immediately, a plain/non-resumable
-terminal stops and removes immediately, and a resumable agent asks before it
-is stopped and archived. Confirmation preserves its conversation and
-artifacts; **Detach Pane** remains the non-lifecycle alternative.
+terminal stops and removes immediately, and a live resumable agent asks before
+it is stopped. Its row stays in the sidebar's stopped section, ready to
+Resume; an already-stopped resumable row asks before it is removed.
+**Detach Pane** remains the non-lifecycle alternative.
 The collapsed row's busy spinner aggregates every member Session; the
 representative is only the row anchor, so activity in another pane must remain
 visible in the sidebar.

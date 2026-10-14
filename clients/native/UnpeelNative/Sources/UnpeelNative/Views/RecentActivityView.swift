@@ -5,8 +5,7 @@
 //  The app-wide "All recent" page: live active sessions on top, then the
 //  persisted activity feed (ActivityLog.swift) grouped by day. Opened from
 //  the "All recent" footer link in the titlebar/menu-bar activity dropdowns
-//  (or ⇧⌘R); rendered in the main content pane with the exact shell and
-//  card language of ArchivedSessionsView.
+//  (or ⇧⌘R); rendered in the main content pane.
 //
 
 import SwiftUI
@@ -225,7 +224,7 @@ struct RecentActivityView: View {
 
 // MARK: - Row
 
-/// Compact single-line table row (matches ArchivedSessionCard's row form):
+/// Compact single-line table row:
 /// bare CLI logo, title, then muted trailing columns — project and event —
 /// with a subtle hover highlight. Working rows swap the logo for the
 /// CLI-colored spinner; done rows (unread and settled) swap it for the blue

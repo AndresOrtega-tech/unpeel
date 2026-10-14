@@ -101,13 +101,10 @@ public enum TopBarSheet: String, Identifiable {
     case activity
     case organize
     /// Folder organize sheet for `store.organizeTargetProjectID` (sidebar
-    /// project/group long-press): rename, sort, color, archive library.
+    /// project/group long-press): rename, sort, color.
     case organizeProject
     case gallery
     case textSelection
-    /// The archive library of `store.archiveLibraryProjectID` (opened from a
-    /// project's organize sheet) — restore / restore-and-resume older sessions.
-    case archive
     public var id: String { rawValue }
 }
 

@@ -69,13 +69,12 @@ final class ProviderCapabilitiesTests: XCTestCase {
         ))
     }
 
-    func testSidebarResumePresentationMatchesRuntimeAndArchiveState() {
+    func testSidebarResumePresentationMatchesRuntimeAndStoppedState() {
         func presentation(
             command: String = "claude",
             status: SessionStatus = .idle,
             activeRuntimeID: String? = nil,
-            hostProtocolVersion: Int = 3,
-            archived: Bool = false
+            hostProtocolVersion: Int = 3
         ) -> SessionRowResumePresentation {
             let session = SessionEntry(
                 id: "session", projectID: "project", label: "Session",
@@ -85,7 +84,6 @@ final class ProviderCapabilitiesTests: XCTestCase {
             )
             return sessionRowResumePresentation(
                 session: session,
-                isArchived: archived,
                 canRestart: ProviderCapabilities.canRestart(command: command),
                 canResumeAgent: ProviderCapabilities.canResumeAgent(
                     command: command,
@@ -104,19 +102,16 @@ final class ProviderCapabilitiesTests: XCTestCase {
         XCTAssertEqual(presentation(), .resumeAgent)
         XCTAssertEqual(presentation(hostProtocolVersion: 2), .none)
         XCTAssertEqual(
-            presentation(command: "custom-tool", status: .exited, archived: true),
-            .restore
+            presentation(command: "custom-tool", status: .exited),
+            .none,
+            "a stopped row without a resume recipe offers no Resume"
         )
-        XCTAssertEqual(
-            presentation(status: .exited, archived: true),
-            .restoreAndResume
-        )
+        XCTAssertEqual(presentation(status: .exited), .resumeSession)
+        XCTAssertEqual(SessionRowResumePresentation.resumeSession.title, "Resume")
 
         XCTAssertTrue(sessionRowShowsInlineResume(.resumeAgent))
         XCTAssertTrue(sessionRowShowsInlineResume(.resumeSession))
-        XCTAssertTrue(sessionRowShowsInlineResume(.restoreAndResume))
         XCTAssertFalse(sessionRowShowsInlineResume(.none))
-        XCTAssertFalse(sessionRowShowsInlineResume(.restore))
     }
 
     func testNotifyWhenDoneRequiresLifecycleHooks() {
@@ -193,6 +188,15 @@ final class ProviderCapabilitiesTests: XCTestCase {
         XCTAssertNil(unknown.restartAgent)
         XCTAssertEqual(unknown.resumeAgent, false)
         XCTAssertFalse(unknown.notifyWhenDone)
+        XCTAssertFalse(unknown.resumable, "no resume recipe: Remove, not Stop")
+
+        let liveClaude = ProviderCapabilities.remote(session: SessionEntry(
+            id: "claude", projectID: "p", label: "Claude", command: "claude",
+            createdAt: 1, status: .busy, activeRuntimeID: "claude",
+            hostProtocolVersion: 3, hasResumableState: true
+        ))
+        XCTAssertTrue(liveClaude.resumable, "a live resumable launch offers Stop")
+        XCTAssertFalse(liveClaude.restart)
 
         let stoppedBlank = ProviderCapabilities.remote(session: SessionEntry(
             id: "blank", projectID: "p", label: "Terminal", command: "",

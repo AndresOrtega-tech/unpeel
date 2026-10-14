@@ -49,7 +49,6 @@
 		D0067DE734CD9822E6E14032 /* UnpeelShared in Frameworks */ = {isa = PBXBuildFile; productRef = F3C1B035F426586A97EA8CBC /* UnpeelShared */; };
 		DEA4D27E7E6E9670A0019738 /* TerminalSessionCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 031A4729CA2E9483ADA358C5 /* TerminalSessionCache.swift */; };
 		DF75995BF874B48FB50DA8EE /* RemoteTerminalWebSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2587BC2C493BEAEC57E4AD9E /* RemoteTerminalWebSocket.swift */; };
-		E948BA854287FDD3A80A08E6 /* ArchivedSessionsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5490E0DB3F682CA7E9BD4FDC /* ArchivedSessionsSheet.swift */; };
 		E9B943585B7DE54019B2A5E2 /* SessionLRUIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5BA0F3EFF25D7095CC41D50 /* SessionLRUIndexTests.swift */; };
 		F430DB6E6FF4567F36E836EB /* RemoteMouseWheelPreferenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91665E27B97F3EC3B1AF962 /* RemoteMouseWheelPreferenceTests.swift */; };
 		F7B3B48F981DC88572535695 /* UnpeelIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD8B97D14664B1460BC86B4F /* UnpeelIOSApp.swift */; };
@@ -86,7 +85,6 @@
 		4DE0A8A88A7C75B1B8C6DE7A /* SessionOrganizeSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionOrganizeSheet.swift; sourceTree = "<group>"; };
 		51A95FD6742717367B56B702 /* DictationReflection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationReflection.swift; sourceTree = "<group>"; };
 		52EEA2336A3740AB8188D474 /* TerminalQueryStripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalQueryStripTests.swift; sourceTree = "<group>"; };
-		5490E0DB3F682CA7E9BD4FDC /* ArchivedSessionsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchivedSessionsSheet.swift; sourceTree = "<group>"; };
 		5B2930CBC1E438FE112E8574 /* MascotView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MascotView.swift; sourceTree = "<group>"; };
 		5C70EADE8D0522BAF6E6BA08 /* RemoteDirectTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDirectTransport.swift; sourceTree = "<group>"; };
 		6B38875DF944FBFF6DAD2FCA /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -191,7 +189,6 @@
 			isa = PBXGroup;
 			children = (
 				26682F9596E7F66A050E29A6 /* AppLock.swift */,
-				5490E0DB3F682CA7E9BD4FDC /* ArchivedSessionsSheet.swift */,
 				206A52245EC5E8A90D080850 /* BrowserGalleryPanel.swift */,
 				96A6E0A24C494F55C74A71E5 /* DevSettings.swift */,
 				51A95FD6742717367B56B702 /* DictationReflection.swift */,
@@ -356,7 +353,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				B3AB5ABDD497E2D81FE16AB5 /* AppLock.swift in Sources */,
-				E948BA854287FDD3A80A08E6 /* ArchivedSessionsSheet.swift in Sources */,
 				F9528893B56A67DE090B2939 /* BrowserGalleryPanel.swift in Sources */,
 				B811FDB432E51119FB2681FE /* DevSettings.swift in Sources */,
 				733B56E538B00ED3D6BA93ED /* DictationReflection.swift in Sources */,

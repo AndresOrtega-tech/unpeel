@@ -623,8 +623,10 @@ pub struct HostRuntime {
     overlay_refresh_pending: bool,
     activity_log: unpeel_core::activity_log::ActivityLogStore,
     unread_ids: HashSet<String>,
-    /// Host-owned auto-stop-and-archive sweep (`auto_archive.rs`).
-    auto_archive: crate::auto_archive::Sweeper,
+    /// Host-owned auto-stop sweep (`auto_stop.rs`).
+    auto_stop: crate::auto_stop::Sweeper,
+    /// Removes stopped Sessions past the keep limit (`retention.rs`).
+    retention: crate::retention::Retention,
     /// Last Host-wide sweep of abandoned resumable uploads.
     last_upload_sweep: Option<Instant>,
     last_activity_state_signature: Option<crate::activity_snapshot::ActivityStateSignature>,
@@ -689,6 +691,15 @@ impl HostRuntime {
         let native_probe = NativeProbe::start(port);
         let native_authority = native_probe.current();
         let overlay_snapshot = overlay.snapshot();
+        // Sessions an older Host archived become plain stopped rows (marker
+        // and scrollback dropped) before the first scan publishes them.
+        let migrated = unpeel_core::session_ops::migrate_archived_sessions();
+        if migrated > 0 {
+            crate::tracelog::trace(
+                "host-worker",
+                &format!("migrated {migrated} archived sessions to stopped rows"),
+            );
+        }
         let mut engine = ActivityEngine::default();
         let mut scan_cache = ScanCache::default();
         let model = scan_sidebar(
@@ -762,7 +773,8 @@ impl HostRuntime {
             streamer_status: None,
             pty_core,
             pty_core_status: None,
-            auto_archive: crate::auto_archive::Sweeper::default(),
+            auto_stop: crate::auto_stop::Sweeper::default(),
+            retention: crate::retention::Retention::default(),
             last_upload_sweep: None,
             browser_engine_rx: if browser_engine_install_enabled() {
                 Some(spawn_browser_engine_install(&home))
@@ -902,7 +914,8 @@ impl HostRuntime {
             self.rescan();
             self.last_scan = Instant::now();
             self.reconcile_direct(&mut emitted);
-            self.sweep_auto_archive(&mut emitted);
+            self.sweep_auto_stop(&mut emitted);
+            self.sweep_retention(&mut emitted);
             self.sweep_incomplete_uploads();
         }
         self.reconcile_link(&mut emitted);
@@ -1017,37 +1030,57 @@ impl HostRuntime {
             });
     }
 
-    /// Once per rescan: archive Sessions idle past the workspace cutoff. The
+    /// Once per rescan: stop Sessions idle past the workspace cutoff. The
     /// setting is re-read from disk each time so a `unpeel settings set` or
     /// an app edit applies at the next sweep without a restart.
-    fn sweep_auto_archive(&mut self, emitted: &mut Vec<ServeEvent>) {
+    fn sweep_auto_stop(&mut self, emitted: &mut Vec<ServeEvent>) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as u64)
             .unwrap_or(0);
-        let minutes = crate::auto_archive::minutes_from_disk();
+        let minutes = crate::auto_stop::minutes_from_disk();
         for event in self
-            .auto_archive
+            .auto_stop
             .step(&self.model.rows, &self.unread_ids, minutes, now_ms)
         {
             match event {
-                crate::auto_archive::SweepEvent::Archived(session_id) => {
+                crate::auto_stop::SweepEvent::Stopped(session_id) => {
                     crate::tracelog::trace(
                         "host-worker",
-                        &format!("auto-archived idle session {session_id} after {minutes} minutes"),
+                        &format!("auto-stopped idle session {session_id} after {minutes} minutes"),
                     );
                     self.status_dirty = true;
                 }
-                crate::auto_archive::SweepEvent::Failed { session_id, error } => {
+                crate::auto_stop::SweepEvent::Failed { session_id, error } => {
                     emitted.push(ServeEvent::Warning(format!(
-                        "auto-archive of {session_id} failed: {error}"
+                        "auto-stop of {session_id} failed: {error}"
                     )));
                 }
-                crate::auto_archive::SweepEvent::Skipped { session_id, reason } => {
+                crate::auto_stop::SweepEvent::Skipped { session_id, reason } => {
                     crate::tracelog::trace(
                         "host-worker",
-                        &format!("auto-archive skips {session_id}: {reason}"),
+                        &format!("auto-stop skips {session_id}: {reason}"),
                     );
+                }
+            }
+        }
+    }
+
+    /// Once per rescan: remove stopped Sessions past their group's keep limit.
+    fn sweep_retention(&mut self, emitted: &mut Vec<ServeEvent>) {
+        for event in self.retention.step(&self.model.expired, now_ms()) {
+            match event {
+                crate::retention::RetentionEvent::Removed(session_id) => {
+                    crate::tracelog::trace(
+                        "host-worker",
+                        &format!("removed stopped session {session_id} past the keep limit"),
+                    );
+                    self.status_dirty = true;
+                }
+                crate::retention::RetentionEvent::Failed { session_id, error } => {
+                    emitted.push(ServeEvent::Warning(format!(
+                        "removing stopped session {session_id} failed: {error}"
+                    )));
                 }
             }
         }

@@ -51,7 +51,7 @@ Claude:
   where the user resumes a different conversation inside Claude re-links to
   it immediately (precise restart-resume and transcript reads follow the
   resumed conversation); the first such event is also what makes the
-  Session archivable/resumable, since nothing mints an id at launch
+  Session resumable, since nothing mints an id at launch
 - Registers the MCP shim as the user-scope server `unpeel` in
   `~/.claude.json` (the file `claude mcp add --scope user` writes), pruning
   the Unpeel-owned `unpeel-mcp`/`unpeel-sessions`/`unpeel-browser` names

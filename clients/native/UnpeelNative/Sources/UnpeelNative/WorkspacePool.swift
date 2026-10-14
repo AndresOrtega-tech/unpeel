@@ -618,7 +618,7 @@ final class WorkspacePool: ObservableObject {
 
         let blocked = Set(
             snapshot.sessions
-                .filter { $0.status == .running && $0.activity == .blocked && !$0.archived }
+                .filter { $0.status == .running && $0.activity == .blocked }
                 .map(\.id)
         )
         var latch = latches[key] ?? AttentionLatch()

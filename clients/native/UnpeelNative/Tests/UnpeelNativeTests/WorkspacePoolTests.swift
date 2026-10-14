@@ -647,14 +647,6 @@ private actor StubPoolBackend: NativeRemoteBackendProtocol {
         throw StubPoolError.unexpected
     }
 
-    func archiveSession(sessionID _: String) async throws -> NativeRemoteEffectReceipt {
-        throw StubPoolError.unexpected
-    }
-
-    func restoreSession(sessionID _: String) async throws -> NativeRemoteEffectReceipt {
-        throw StubPoolError.unexpected
-    }
-
     func stopSession(sessionID _: String) async throws -> NativeRemoteEffectReceipt {
         throw StubPoolError.unexpected
     }
@@ -696,10 +688,6 @@ private actor StubPoolBackend: NativeRemoteBackendProtocol {
     }
 
     func pairingInvitation(_: Data) async throws -> Data {
-        throw StubPoolError.unexpected
-    }
-
-    func listArchivedSessions(projectID _: String) async throws -> [RemoteSessionSummary] {
         throw StubPoolError.unexpected
     }
 

@@ -10,19 +10,12 @@ enum SessionOrganizeResumePresentation: Equatable {
     case none
     case resumeAgent
     case resumeSession
-    case restore
-    case restoreAndResume
 }
 
 func sessionOrganizeResumePresentation(
     session: RemoteSessionSummary,
     hostProtocol: RemoteHostProtocolDescriptor?
 ) -> SessionOrganizeResumePresentation {
-    if session.archived {
-        return session.status == .exited && (session.capabilities?.restart ?? false)
-            ? .restoreAndResume
-            : .restore
-    }
     if session.status == .running {
         guard session.activeRuntimeID == nil,
               !session.runtimeLaunchPending,
@@ -100,7 +93,6 @@ struct SessionOrganizeSheet: View {
     // fails closed so a Controller never promises a resume the Host cannot do.
     private var canResume: Bool {
         resumePresentation == .resumeSession
-            || resumePresentation == .restoreAndResume
     }
 
     private var canResumeAgent: Bool {
@@ -111,11 +103,13 @@ struct SessionOrganizeSheet: View {
         session.capabilities?.notifyWhenDone ?? true
     }
 
-    /// Archive needs the Mac to understand `archived` on the organization
-    /// patch — older Macs silently ignore it, so the fallback here is
-    /// restrictive (hide the verb), unlike the permissive verbs above.
-    private var canArchive: Bool {
-        session.capabilities?.archive ?? false
+    /// Stop ends a running session's process; the stopped row stays in the
+    /// sidebar's stopped tail and offers Resume. Offered only when the Host
+    /// has resume evidence (`capabilities.resumable`) — otherwise a stopped
+    /// row could not come back, so Remove is the honest verb. Older Hosts
+    /// omit the field and fail closed.
+    private var canStop: Bool {
+        session.status == .running && (session.capabilities?.resumable ?? false)
     }
 
     var body: some View {
@@ -192,9 +186,7 @@ struct SessionOrganizeSheet: View {
                             performAction(.restart)
                         } label: {
                             actionLabel(
-                                title: actionInFlight == .restart
-                                    ? (session.archived ? "Restoring & Resuming..." : "Resuming...")
-                                    : (session.archived ? "Restore & Resume" : "Resume"),
+                                title: actionInFlight == .restart ? "Resuming..." : "Resume",
                                 systemImage: "arrow.clockwise",
                                 action: .restart
                             )
@@ -202,37 +194,14 @@ struct SessionOrganizeSheet: View {
                         .disabled(isBusy)
                     }
 
-                    if session.archived {
-                        // A recent archive still showing in the fixed bottom
-                        // section: offer the way back (desktop context menu's
-                        // "Restore from archive").
+                    if canStop {
                         Button {
-                            performAction(.restore)
+                            confirmingAction = .stop
                         } label: {
                             actionLabel(
-                                title: actionInFlight == .restore ? "Restoring..." : "Restore from archive",
-                                systemImage: "arrow.uturn.backward",
-                                action: .restore
-                            )
-                        }
-                        .disabled(isBusy)
-                    } else if canArchive {
-                        Button {
-                            // A running session gets a confirm (archiving
-                            // stops the agent); an ended one archives
-                            // directly — mirroring the desktop rule.
-                            if session.status == .running {
-                                confirmingAction = .archive
-                            } else {
-                                performAction(.archive)
-                            }
-                        } label: {
-                            actionLabel(
-                                title: actionInFlight == .archive
-                                    ? "Archiving..."
-                                    : (session.status == .running ? "Stop and archive" : "Archive"),
-                                systemImage: "archivebox",
-                                action: .archive
+                                title: actionInFlight == .stop ? "Stopping..." : "Stop",
+                                systemImage: "stop.circle",
+                                action: .stop
                             )
                         }
                         .disabled(isBusy)
@@ -252,22 +221,18 @@ struct SessionOrganizeSheet: View {
                     if let actionFailed {
                         Text(actionFailed)
                             .foregroundStyle(.red)
-                    } else if session.archived, canResume {
-                        Text("Restore & Resume puts the session back in the regular list and continues the conversation. Remove deletes it.")
-                    } else if session.archived {
-                        Text("Restore puts the session back in the regular list. Remove deletes it.")
                     } else if session.status == .running {
-                        if canResumeAgent {
-                            Text("Resume Agent continues in this terminal. Stop and archive files it away; Remove deletes the session.")
-                        } else if canArchive {
-                            Text("Stop and archive stops the session and files it away (restorable anytime). Remove deletes it.")
+                        if canResumeAgent, canStop {
+                            Text("Resume Agent continues in this terminal. Stop ends the session and keeps it in the list to resume later; Remove deletes it.")
+                        } else if canResumeAgent {
+                            Text("Resume Agent continues in this terminal. Remove stops and deletes the session.")
+                        } else if canStop {
+                            Text("Stop ends the session and keeps it in the list to resume later. Remove stops and deletes it.")
                         } else {
                             Text("This launch has no resumable provider session. Remove stops and deletes it.")
                         }
                     } else if canResume {
-                        Text(canArchive
-                            ? "Resume continues the conversation. Archive files it away. Remove deletes it."
-                            : "Resume continues the conversation. Remove clears it from the list.")
+                        Text("Resume continues the conversation. Remove clears it from the list.")
                     } else {
                         Text("Remove clears the session from the list.")
                     }
@@ -302,11 +267,11 @@ struct SessionOrganizeSheet: View {
             titleVisibility: .visible
         ) {
             if let action = confirmingAction {
-                // Archive is non-destructive (everything is kept), so its
-                // confirm button is not styled as a destructive action.
+                // Stop is non-destructive (the row stays and offers Resume),
+                // so its confirm button is not styled as a destructive action.
                 Button(
                     action.confirmButtonTitle(for: session),
-                    role: action == .archive ? nil : .destructive
+                    role: action == .stop ? nil : .destructive
                 ) {
                     let confirmed = action
                     confirmingAction = nil
@@ -392,22 +357,10 @@ struct SessionOrganizeSheet: View {
         actionFailed = nil
         saveFailed = false
         Task {
-            let ok: Bool
-            if let remoteAction = action.remoteAction {
-                ok = await store.performSessionAction(
-                    sessionID: session.id,
-                    action: remoteAction
-                )
-            } else {
-                // Archive/restore ride the organization patch (`archived`),
-                // not the kill-verb action endpoint.
-                ok = await store.updateSessionOrganization(
-                    sessionID: session.id,
-                    title: nil,
-                    pinned: nil,
-                    archived: action == .archive
-                )
-            }
+            let ok = await store.performSessionAction(
+                sessionID: session.id,
+                action: action.remoteAction
+            )
             actionInFlight = nil
             if ok {
                 dismiss()
@@ -422,20 +375,15 @@ private enum SessionSheetAction: String, Identifiable {
     case restart
     case resumeAgent
     case stop
-    case archive
-    case restore
     case remove
 
     var id: String { rawValue }
 
-    /// nil for archive/restore, which travel on the organization patch
-    /// instead of the session-action endpoint.
-    var remoteAction: RemoteSessionAction? {
+    var remoteAction: RemoteSessionAction {
         switch self {
         case .restart: return .restart
         case .resumeAgent: return .resumeAgent
         case .stop: return .stop
-        case .archive, .restore: return nil
         case .remove: return .remove
         }
     }
@@ -445,8 +393,6 @@ private enum SessionSheetAction: String, Identifiable {
         case .restart: return "restart"
         case .resumeAgent: return "resume agent"
         case .stop: return "stop"
-        case .archive: return "archive"
-        case .restore: return "restore"
         case .remove: return "remove"
         }
     }
@@ -459,11 +405,6 @@ private enum SessionSheetAction: String, Identifiable {
             return "Resume Agent?"
         case .stop:
             return "Stop Session?"
-        case .archive:
-            return "Stop and Archive Session?"
-        case .restore:
-            // Restore is non-destructive and never confirms.
-            return "Restore Session?"
         case .remove:
             return session.status == .running ? "Remove Session?" : "Remove From List?"
         }
@@ -476,11 +417,7 @@ private enum SessionSheetAction: String, Identifiable {
         case .resumeAgent:
             return "Resume Agent"
         case .stop:
-            return "Stop Session"
-        case .archive:
-            return "Archive"
-        case .restore:
-            return "Restore"
+            return "Stop"
         case .remove:
             return session.status == .running ? "Remove Session" : "Remove From List"
         }
@@ -493,11 +430,7 @@ private enum SessionSheetAction: String, Identifiable {
         case .resumeAgent:
             return "This resumes the managed agent inside the same terminal. The Session and terminal history stay open."
         case .stop:
-            return "This stops the running process but keeps the transcript so you can resume later."
-        case .archive:
-            return "This stops the running process and files the session into the project's archive on your Mac. Everything is kept — restore and resume it anytime."
-        case .restore:
-            return "This puts the archived session back in the regular list."
+            return "This stops the running process and clears its terminal scrollback. The session stays in the list so you can resume it later."
         case .remove:
             if session.status == .running {
                 return "This stops the running process and removes the session from Unpeel. It does not delete the agent’s conversation."

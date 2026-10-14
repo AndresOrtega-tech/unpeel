@@ -767,7 +767,7 @@ final class SidebarSessionDragController: ObservableObject {
         // non-control region and let the ordinary tap remain as a fallback.
         // If the press becomes a drag, beginDrag restores the prior terminal
         // so that visible Session remains the Split Pane destination.
-        // The trailing cluster is reserved for Resume/Archive/runtime
+        // The trailing cluster is reserved for Resume/Stop/runtime
         // controls; confirmation and edit modes own the whole row.
         let selectionBeforePress = store?.selectedSessionID
         if let (id, record) = sessionRow(at: point),
@@ -828,15 +828,11 @@ final class SidebarSessionDragController: ObservableObject {
            store.editingSessionSurface == .sidebar {
             return false
         }
-        if store.confirmingRemoveSessionID == sessionID,
-           store.confirmingRemoveSurface == .sidebar {
-            return false
-        }
-        if store.confirmingArchiveSessionID == sessionID { return false }
+        if store.confirmingRemoveSessionID == sessionID { return false }
+        if store.confirmingStopSessionID == sessionID { return false }
         return !store.removingSessionIDs.contains(sessionID)
             && !store.restartingSessionIDs.contains(sessionID)
             && !store.resumingAgentSessionIDs.contains(sessionID)
-            && !store.archivingSessionIDs.contains(sessionID)
     }
 
     private func handleMouseDragged(_ event: NSEvent, in view: NSView) -> NSEvent? {

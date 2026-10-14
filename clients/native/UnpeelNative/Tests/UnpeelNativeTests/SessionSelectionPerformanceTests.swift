@@ -79,7 +79,7 @@ final class SessionSelectionPerformanceTests: XCTestCase {
             UnpeelStore.selectionChangeAffectsSidebarLists(
                 from: "running",
                 to: "other-running",
-                windowedInactiveSessionIDs: ["stopped", "archived"]
+                windowedInactiveSessionIDs: ["stopped", "older-stopped"]
             )
         )
         XCTAssertFalse(
@@ -97,30 +97,30 @@ final class SessionSelectionPerformanceTests: XCTestCase {
             UnpeelStore.selectionChangeAffectsSidebarLists(
                 from: "running",
                 to: "stopped",
-                windowedInactiveSessionIDs: ["stopped", "archived"]
+                windowedInactiveSessionIDs: ["stopped", "older-stopped"]
             )
         )
         XCTAssertTrue(
             UnpeelStore.selectionChangeAffectsSidebarLists(
                 from: "running",
-                to: "archived",
-                windowedInactiveSessionIDs: ["stopped", "archived"]
+                to: "older-stopped",
+                windowedInactiveSessionIDs: ["stopped", "older-stopped"]
             )
         )
         XCTAssertTrue(
             UnpeelStore.selectionChangeAffectsSidebarLists(
-                from: "archived",
+                from: "older-stopped",
                 to: "stopped",
-                windowedInactiveSessionIDs: ["stopped", "archived"]
+                windowedInactiveSessionIDs: ["stopped", "older-stopped"]
             )
         )
         XCTAssertFalse(
             UnpeelStore.selectionChangeAffectsSidebarLists(
                 from: "running",
-                to: "archived",
+                to: "older-stopped",
                 windowedInactiveSessionIDs: []
             ),
-            "an in-flight archive row is already forced visible"
+            "a row outside the windowed preview cannot change membership"
         )
     }
 }

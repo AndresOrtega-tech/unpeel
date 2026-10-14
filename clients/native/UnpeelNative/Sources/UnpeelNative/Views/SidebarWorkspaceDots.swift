@@ -1047,7 +1047,6 @@ struct SidebarListContent: Equatable {
         /// swap from producing a one-pixel-looking active-row jump.
         let isSelected: Bool
         let isUnread: Bool
-        let isArchived: Bool
         /// Runtime marks for the pane group carried by this representative row.
         let paneItems: [UnpeelStore.PaneSidebarItem]
         /// Non-nil in date-sorted groups, matching the real row's age source.
@@ -1339,8 +1338,7 @@ enum SidebarListContentBuilder {
             ) ?? [])
         let eligibleSessionIDs: Set<String> = Set(
             store.sessionsByID.values.compactMap { session -> String? in
-                guard !store.archivedSessionIDs.contains(session.id),
-                      session.isAttachable || session.status == .starting
+                guard session.isAttachable || session.status == .starting
                 else { return nil }
                 return session.id
             }
@@ -1400,7 +1398,6 @@ enum SidebarListContentBuilder {
                             isPinned: pinned,
                             isSelected: entry.id == selectedSessionID,
                             isUnread: store.sessionIsUnread(entry.id),
-                            isArchived: store.sessionIsRecentArchived(entry.id),
                             paneItems: paneProjection.itemsByRepresentative[entry.id] ?? [],
                             ageTimestampMs: store.isDateSorted(projectID: entry.projectID)
                                 ? max(entry.createdAt, entry.lifecycleAtMs ?? 0)
@@ -1408,9 +1405,7 @@ enum SidebarListContentBuilder {
                         )
                     },
                     emptyLabel: { n in
-                        store.archivedSessionCount(in: n) == 0
-                            ? "No sessions yet."
-                            : "No active sessions."
+                        n.sessions.isEmpty ? "No sessions yet." : "No active sessions."
                     }
                 )
             }
@@ -1555,8 +1550,7 @@ enum SidebarListContentBuilder {
             }
         let eligibleSessionIDs: Set<String> = Set(
             sessionsByID.values.compactMap { entry -> String? in
-                guard summariesByID[entry.id]?.archived != true,
-                      entry.isAttachable || entry.status == .starting
+                guard entry.isAttachable || entry.status == .starting
                 else { return nil }
                 return entry.id
             }
@@ -1572,7 +1566,7 @@ enum SidebarListContentBuilder {
             for: selectedSessionID
         )
         // Pins first (Host flags, Host order); live rows next in Host order;
-        // then the Host-windowed stopped/archive preview (unread inactive rows
+        // then the Host-windowed stopped preview (unread inactive rows
         // always stay visible).
         func sessionLists(_ n: ProjectNode) -> (pinned: [SessionEntry], displayed: [SessionEntry]) {
             let dateSorted = projectSummaries[n.id]?.dateSorted == true
@@ -1584,11 +1578,11 @@ enum SidebarListContentBuilder {
             let active = candidates.filter(\.isLive)
             let stopped = candidates.filter { !$0.isLive }
                 .sorted { recency($0) > recency($1) }
-            // The pooled Host snapshot is already archive-windowed by that
+            // The pooled Host snapshot is already stopped-windowed by that
             // Host. Keep its exact projection; this Mac's local preference
             // must not reshape another workspace or remote Host.
             let visibleStopped = stopped
-            // The stopped/archive section renders in recency order in the real list
+            // The stopped section renders in recency order in the real list
             // regardless of the group's manual order (sidebarSessionBlocks
             // appends `sortedStopped` after the active section).
             return (pinned, active + visibleStopped)
@@ -1603,7 +1597,6 @@ enum SidebarListContentBuilder {
                 isPinned: pinned,
                 isSelected: entry.id == displayedSelectedSessionID,
                 isUnread: summary?.unread == true,
-                isArchived: summary?.archived == true,
                 paneItems: paneProjection.itemsByRepresentative[entry.id] ?? [],
                 ageTimestampMs: projectSummaries[entry.projectID]?.dateSorted == true
                     ? recency(entry)
@@ -1709,9 +1702,7 @@ enum SidebarListContentBuilder {
                     displayedItems: displayedItems,
                     sessionRow: makeSessionRow,
                     emptyLabel: { n in
-                        (projectSummaries[n.id]?.archivedSessionCount ?? 0) == 0
-                            ? "No sessions yet."
-                            : "No active sessions."
+                        n.sessions.isEmpty ? "No sessions yet." : "No active sessions."
                     }
                 )
             }
@@ -1860,7 +1851,6 @@ private struct SidebarPooledListBody: View {
                 isUnread: row.isUnread,
                 isPinned: row.isPinned,
                 canPin: false,
-                isArchived: row.isArchived,
                 canClearAttention: false,
                 paneItems: row.paneItems,
                 ageTimestampMs: row.ageTimestampMs,

@@ -363,22 +363,6 @@ int32_t unpeel_native_bridge_remote_approval_answer(
     size_t *out_length
 );
 
-int32_t unpeel_native_bridge_remote_session_archive(
-    unpeel_native_bridge_remote_handle_t handle,
-    const uint8_t *session_id_pointer,
-    size_t session_id_length,
-    uint8_t **out_pointer,
-    size_t *out_length
-);
-
-int32_t unpeel_native_bridge_remote_session_restore(
-    unpeel_native_bridge_remote_handle_t handle,
-    const uint8_t *session_id_pointer,
-    size_t session_id_length,
-    uint8_t **out_pointer,
-    size_t *out_length
-);
-
 int32_t unpeel_native_bridge_remote_session_stop(
     unpeel_native_bridge_remote_handle_t handle,
     const uint8_t *session_id_pointer,
@@ -591,14 +575,6 @@ int32_t unpeel_native_bridge_remote_upload_attachment(
  * Capability-gated reads (not effects). Success returns owned typed JSON;
  * failures return owned JSON with stable code and error fields.
  */
-int32_t unpeel_native_bridge_remote_archived_sessions(
-    unpeel_native_bridge_remote_handle_t handle,
-    const uint8_t *project_id_pointer,
-    size_t project_id_length,
-    uint8_t **out_pointer,
-    size_t *out_length
-);
-
 /* entries limits to the most recent N transcript entries; 0 = Host default. */
 int32_t unpeel_native_bridge_remote_transcript_markdown(
     unpeel_native_bridge_remote_handle_t handle,

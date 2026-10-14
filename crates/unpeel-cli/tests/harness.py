@@ -391,7 +391,7 @@ class Home:
             sock.bind(sock_path)
             sock.listen(4)
             self._socks.append(sock)
-            # Honest-stop contract (session_ops): stop/archive/restart only
+            # Honest-stop contract (session_ops): stop/restart only
             # succeed once the manifest reaches "exited", so a fake session
             # must answer its control socket like a real host — ack the kill,
             # reap the parked child, and file the exited manifest.
@@ -494,9 +494,9 @@ class Home:
             json.dump(body, handle)
 
     def seed_resume_data(self, *session_ids):
-        """Make claude-command fixtures archivable/resumable under the
-        evidence-based gate: `can_archive_manifest` (and everything derived
-        from it — Resume, Resume Agent, stop-and-archive) requires a managed
+        """Make claude-command fixtures resumable under the evidence-based
+        gate: `has_resume_evidence` (and everything derived from it — Resume,
+        Resume Agent, the summary's `resumable`) requires a managed
         storage dir holding a provider-created file, not just a
         resumable-looking command. Stamps each manifest with the storage
         path, like a real launch."""
@@ -809,7 +809,7 @@ class FakeHost:
                         command.get("expected_generation")
                     )
                 elif kind == "kill":
-                    # Honest-stop contract (session_ops): stop/archive/restart
+                    # Honest-stop contract (session_ops): stop/restart
                     # block until the manifest reaches "exited", so a fake
                     # host must file it the way a real one does.
                     try:

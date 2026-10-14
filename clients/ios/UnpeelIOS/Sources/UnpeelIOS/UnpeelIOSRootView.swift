@@ -91,13 +91,6 @@ public struct UnpeelIOSRootView: View {
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
                 }
-            case .archive:
-                if let projectID = store.archiveLibraryProjectID,
-                   let project = store.projectsByID[projectID] {
-                    ArchivedSessionsSheet(store: store, project: project)
-                        .presentationDetents([.medium, .large])
-                        .presentationDragIndicator(.visible)
-                }
             }
         }
         .onChange(of: store.topBarSheet != nil) { presented in
@@ -1264,33 +1257,31 @@ struct SessionSidebarView: View {
     private func pinnedSessions(for project: RemoteProjectSummary) -> [RemoteSessionSummary] {
         sessions(for: project).filter {
             ($0.pinned || tree.isProjectSidebarMember($0))
-                && !$0.archived && !tree.isPaneChild($0)
+                && !tree.isPaneChild($0)
         }
     }
 
     private func regularSessions(for project: RemoteProjectSummary) -> [RemoteSessionSummary] {
         sessions(for: project).filter {
-            // Live project-sidebar members show pinned at top; only their
-            // archived rows fall back into the ordinary list.
-            (!tree.isProjectSidebarMember($0) || $0.archived)
-                && (!$0.pinned || $0.archived)
+            // Live project-sidebar members show pinned at top.
+            !tree.isProjectSidebarMember($0)
+                && !$0.pinned
                 && !tree.isPaneChild($0)
         }
     }
 
     /// The desktop sidebar model, mirrored: running sessions always render,
-    /// followed by at most 5 naturally stopped and archived sessions combined;
+    /// followed by at most 5 stopped sessions;
     /// selected/unread/working/blocked inactive rows always stay. A new Host
     /// already sends the list partitioned and windowed, so this is a stable
     /// no-op there; against an older Mac (full interleaved list) it applies the
     /// same model phone-side.
     private func displayedRegularSessions(for project: RemoteProjectSummary) -> [RemoteSessionSummary] {
         let regular = regularSessions(for: project)
-        let active = regular.filter { !$0.archived && $0.status == .running }
-        let stopped = regular.filter { !$0.archived && $0.status != .running }
-        let archived = regular.filter(\.archived)
+        let active = regular.filter { $0.status == .running }
+        let stopped = regular.filter { $0.status != .running }
         var inactiveRank = 0
-        return active + (stopped + archived).compactMap { session in
+        return active + stopped.compactMap { session in
             let insidePreview = inactiveRank < Self.visibleSessionLimit
             inactiveRank += 1
             if insidePreview || session.id == store.selectedSessionID || session.unread
@@ -1408,15 +1399,13 @@ struct IOSSidebarProjectTree {
         var childrenByRepresentative: [String: [RemoteSessionSummary]] = [:]
         var representativeByChild: [String: RemoteSessionSummary] = [:]
         for group in snapshot.paneGroups ?? [] {
-            guard let representative = sessionsByID[group.representativeSessionID],
-                  !representative.archived
+            guard let representative = sessionsByID[group.representativeSessionID]
             else { continue }
 
             var seenInGroup = Set<String>()
             let orderedMembers = group.sessionIDs.compactMap { id -> RemoteSessionSummary? in
                 guard seenInGroup.insert(id).inserted,
-                      let session = sessionsByID[id],
-                      !session.archived
+                      let session = sessionsByID[id]
                 else { return nil }
                 return session
             }
@@ -1504,16 +1493,6 @@ struct IOSSidebarProjectTree {
                 return true
             }
         }
-        func archivedLast(_ items: [IOSSidebarMixedItem]) -> [IOSSidebarMixedItem] {
-            let archives = items.filter { item in
-                if case .session(let session) = item { return session.archived }
-                return false
-            }
-            return items.filter { item in
-                if case .session(let session) = item { return !session.archived }
-                return true
-            } + archives
-        }
         guard !folders.isEmpty else {
             return sessions.map { .session($0) }
         }
@@ -1521,10 +1500,8 @@ struct IOSSidebarProjectTree {
         let rankedIDs = order ?? []
         let mixed = rankedIDs.contains { folderIDs.contains($0) }
         if dateSorted || !mixed {
-            return archivedLast(
-                pinnedGroupsFirst(
-                    folders.map { .folder($0) } + sessions.map { .session($0) }
-                )
+            return pinnedGroupsFirst(
+                folders.map { .folder($0) } + sessions.map { .session($0) }
             )
         }
         var byID: [String: IOSSidebarMixedItem] = [:]
@@ -1543,9 +1520,7 @@ struct IOSSidebarProjectTree {
         let unrankedFolders = folders
             .filter { !seen.contains($0.id) }
             .map { IOSSidebarMixedItem.folder($0) }
-        return archivedLast(
-            pinnedGroupsFirst(unrankedSessions + unrankedFolders + ranked)
-        )
+        return pinnedGroupsFirst(unrankedSessions + unrankedFolders + ranked)
     }
 
     func revealIDs(forProjectID projectID: String) -> Set<String> {
@@ -1994,7 +1969,7 @@ private struct MacStyleProjectRow: View {
     let hasAttentionSession: Bool
     let canCreateSession: Bool
     let onAdd: () -> Void
-    /// Long-press: the folder organize sheet (rename/sort/color/archive) —
+    /// Long-press: the folder organize sheet (rename/sort/color) —
     /// the phone's stand-in for the desktop project context menu.
     var onOrganize: (() -> Void)? = nil
     let onToggle: () -> Void
@@ -2162,7 +2137,7 @@ private struct MacStyleSessionRow: View {
             }
             .accessibilityLabel(
                 "\(session.title), \(project?.name ?? "No project")"
-                    + (session.pinned && !session.archived ? ", pinned" : "")
+                    + (session.pinned ? ", pinned" : "")
                     + (paneChild ? ", pane member" : "")
             )
             .accessibilityHint(onOrganize == nil ? "" : "Hold to organize this session")
@@ -2194,7 +2169,7 @@ private struct MacStyleSessionRow: View {
                 // Pinning is context-menu / organize-sheet-only, just like
                 // desktop. A pinned Session keeps this passive mark directly
                 // beside its label; unpinned rows gain no extra chrome.
-                if session.pinned && !session.archived {
+                if session.pinned {
                     SharedChromeIconView(icon: .pin, size: 11)
                         .foregroundStyle(IOSSidebarTheme.mutedForeground)
                         .fixedSize()

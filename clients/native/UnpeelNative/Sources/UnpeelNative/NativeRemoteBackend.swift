@@ -183,8 +183,6 @@ protocol NativeRemoteBackendProtocol: Sendable {
     /// File the Session under another project/group (`session.project.set`).
     func setSessionProject(sessionID: String, projectID: String) async throws
         -> NativeRemoteEffectReceipt
-    func archiveSession(sessionID: String) async throws -> NativeRemoteEffectReceipt
-    func restoreSession(sessionID: String) async throws -> NativeRemoteEffectReceipt
     func stopSession(sessionID: String) async throws -> NativeRemoteEffectReceipt
     func removeSession(sessionID: String) async throws -> NativeRemoteEffectReceipt
     func restartSession(sessionID: String) async throws -> NativeRemoteEffectReceipt
@@ -225,7 +223,6 @@ protocol NativeRemoteBackendProtocol: Sendable {
         contentType: String,
         bytes: Data
     ) async throws -> String
-    func listArchivedSessions(projectID: String) async throws -> [RemoteSessionSummary]
     func transcriptMarkdown(
         sessionID: String,
         entries: Int?
@@ -1249,22 +1246,6 @@ final class NativeRemoteBackend: @unchecked Sendable {
         }
     }
 
-    func archiveSession(sessionID: String) async throws -> NativeRemoteEffectReceipt {
-        try await performSessionEffect(
-            sessionID: sessionID,
-            operation: "session archive",
-            call: unpeel_native_bridge_remote_session_archive
-        )
-    }
-
-    func restoreSession(sessionID: String) async throws -> NativeRemoteEffectReceipt {
-        try await performSessionEffect(
-            sessionID: sessionID,
-            operation: "session restore",
-            call: unpeel_native_bridge_remote_session_restore
-        )
-    }
-
     func stopSession(sessionID: String) async throws -> NativeRemoteEffectReceipt {
         try await performSessionEffect(
             sessionID: sessionID,
@@ -1785,56 +1766,6 @@ final class NativeRemoteBackend: @unchecked Sendable {
                 )
             }
             return receipt.path
-        }
-    }
-
-    func listArchivedSessions(projectID: String) async throws -> [RemoteSessionSummary] {
-        let handle = try currentIdentityValidatedHandle()
-        let project = Data(projectID.utf8)
-        return try await Self.runBlocking(priority: .userInitiated) {
-            try Task.checkCancellation()
-            var outputPointer: UnsafeMutablePointer<UInt8>?
-            var outputLength = 0
-            let result = project.withUnsafeBytes { bytes in
-                unpeel_native_bridge_remote_archived_sessions(
-                    handle,
-                    bytes.bindMemory(to: UInt8.self).baseAddress,
-                    bytes.count,
-                    &outputPointer,
-                    &outputLength
-                )
-            }
-            let output = Self.takeOutput(outputPointer, length: outputLength)
-            guard result == UNPEEL_NATIVE_BRIDGE_OK else {
-                throw Self.bridgeError(
-                    result: result,
-                    output: output,
-                    fallbackCode: "remote_archive_read_failed",
-                    fallbackMessage: "Could not load this project's archived Sessions."
-                )
-            }
-            do {
-                let response = try JSONDecoder().decode(
-                    RemoteArchivedSessionsResponse.self,
-                    from: output
-                )
-                guard response.projectID == projectID else {
-                    throw NativeRemoteBackendError(
-                        result: Int32(UNPEEL_NATIVE_BRIDGE_ERROR_SERIALIZATION),
-                        code: "remote_archive_project_mismatch",
-                        message: "The Host returned archived Sessions for the wrong project."
-                    )
-                }
-                return response.sessions
-            } catch let error as NativeRemoteBackendError {
-                throw error
-            } catch {
-                throw NativeRemoteBackendError(
-                    result: Int32(UNPEEL_NATIVE_BRIDGE_ERROR_SERIALIZATION),
-                    code: "invalid_remote_archive_response",
-                    message: "The Host returned an invalid archived-Sessions response."
-                )
-            }
         }
     }
 

@@ -74,13 +74,13 @@ Useful pieces:
 | `case.app()` | a mock desktop app: owns a port, answers `/mcp/*`, records `calls`; `fail_routes=` simulates an **older** app |
 | `case.host(id)` | a fake session host on the control socket — records writes, resizes, and agent-restart generations |
 | `home.session(...)` | a hosted-session dir; `running=True` parks a real pid and binds a socket |
-| `home.marker(...)` | shared markers (`archived.json`, `title.json`, `read.json`) |
+| `home.marker(...)` | shared markers (`title.json`, `read.json`, `project-override.json`; a legacy `archived.json` to exercise the upgrade migration) |
 | `home.pair_device()` / `home.reserve_mobile_port()` | a paired phone token and the published phone endpoint |
 | `mobile_request(port, path, token)` | an authenticated `/mobile/*` call over TLS, pinned to the Host certificate the way a phone pins (`host_certificate_pin(home)`); `plaintext_mobile_request` is the cleartext shape the Host must refuse with 426 |
 | `McpClient(home, session_id)` | a `unpeel-host __mcp__` child speaking JSON-RPC for one caller Session (`tool_names`, `call`, `McpClient.text`) |
 
-Name checks as the behaviour a user would recognise ("archive falls back to
-the shared marker"), not the mechanism. Pass a `detail` argument — it is
+Name checks as the behaviour a user would recognise ("stop leaves the session
+listed as stopped"), not the mechanism. Pass a `detail` argument — it is
 printed only when the check fails.
 
 ## What is covered
@@ -88,7 +88,7 @@ printed only when the check fails.
 | case | what it protects |
 |---|---|
 | `standalone` | `unpeel serve` is a complete persistent Host with no app: verbs, restart, lease |
-| `mobile` | bootstrap, output, organization, polite-guest port rules for a paired phone |
+| `mobile` | bootstrap, output, organization (incl. an older phone's `archived` patch), the legacy-archive upgrade migration, polite-guest port rules for a paired phone |
 | `pairing` | QR + pairing against the **shipped Swift crypto**, `unpeel pair` through the worker |
 | `approvals` | MCP approvals owned by the Host, answerable from a phone |
 | `host_launch_conformance` | native and headless launchers enter the same canonical Host runtime (71 conformance cases) |

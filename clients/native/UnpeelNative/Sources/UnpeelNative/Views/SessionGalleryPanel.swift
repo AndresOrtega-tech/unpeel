@@ -600,7 +600,7 @@ struct SessionGalleryPanel: View {
     // MARK: - Actions
 
     /// The displayed session's terminal pane exists whenever the session is
-    /// live and mounted; a dead/archived session has nowhere to type.
+    /// live and mounted; a stopped session has nowhere to type.
     private var canAddToPrompt: Bool {
         cache.existingPane(for: sessionID) != nil
     }

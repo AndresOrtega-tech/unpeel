@@ -575,12 +575,12 @@ final class RemoteHostRuntime: ObservableObject {
         (summary: RemoteSessionSummary, expiresAt: ContinuousClock.Instant)?
     private let optimisticCreatedSessionLifetime: Duration
     private var directDataPlaneSelectionSequence: UInt64 = 0
-    /// Restore & Resume mints a new Session id but the legacy success receipt
+    /// Resume mints a new Session id but the legacy success receipt
     /// carries only `{ok:true}`. Correlate the replacement against a snapshot
-    /// latched before either effect, and fail closed on collisions instead of
+    /// latched before the effect, and fail closed on collisions instead of
     /// adopting whichever row happens to sort first.
     private var pendingReplacementSelection: ReplacementSelectionIntent?
-    /// Once a combined restore/restart invalidates the selected id, only an
+    /// Once a restart invalidates the selected id, only an
     /// exact correlation or explicit user choice may select another row.
     /// This remains set after ambiguity/expiry so a later health poll cannot
     /// turn a failed correlation into an arbitrary fallback.
@@ -3307,7 +3307,7 @@ final class RemoteHostRuntime: ObservableObject {
     }
 
     static func defaultSessionID(in snapshot: RemoteBootstrapSnapshot) -> String? {
-        let sessions = snapshot.sessions.filter { !$0.archived }
+        let sessions = snapshot.sessions
         return sessions.first(where: { $0.activity == .blocked })?.id
             ?? sessions.first(where: { $0.status == .running })?.id
             ?? sessions.first?.id
@@ -3330,7 +3330,6 @@ final class RemoteHostRuntime: ObservableObject {
                   session.projectID == intent.projectID,
                   session.createdAtUnixMs == intent.createdAtUnixMs,
                   session.status == .running,
-                  !session.archived,
                   session.worktreePath == intent.worktreePath,
                   session.worktreeBranch == intent.worktreeBranch
             else { return false }
@@ -3404,7 +3403,6 @@ final class RemoteHostRuntime: ObservableObject {
             && lhs.notifyWhenDone == rhs.notifyWhenDone
             && lhs.terminalBackgroundHex == rhs.terminalBackgroundHex
             && lhs.capabilities == rhs.capabilities
-            && lhs.archived == rhs.archived
             && lhs.spinnerColorHex == rhs.spinnerColorHex
             // Alert-only polling changes must reach the desktop activity
             // dropdown even when their timestamps share one minute bucket.
@@ -3439,8 +3437,6 @@ extension RemoteHostRuntime {
         static let write = "session.input.write"
         static let titleSet = "session.title.set"
         static let pinSet = "session.pin.set"
-        static let archive = "session.archive"
-        static let restore = "session.restore"
         static let stop = "session.stop"
         static let remove = "session.remove"
         static let restart = "session.restart"
@@ -3457,7 +3453,6 @@ extension RemoteHostRuntime {
         static let appsInstall = RemoteControlProtocol.appsInstallCapability
         static let integrationsInstall = RemoteControlProtocol.integrationsInstallCapability
         static let appsOpen = RemoteControlProtocol.appsOpenCapability
-        static let archiveList = "session.archive.list"
         static let transcriptMarkdown = "session.transcript.markdown"
         static let pairingInvitation = "pairing.invitation"
         static let artifactUpload = "artifact.upload"
@@ -3577,24 +3572,6 @@ extension RemoteHostRuntime {
         }
     }
 
-    func archiveSession(_ sessionID: String) async throws {
-        try await performOrganizationVerb(
-            capability: HostOperation.archive,
-            operation: "archive"
-        ) { backend in
-            _ = try await backend.archiveSession(sessionID: sessionID)
-        }
-    }
-
-    func restoreSession(_ sessionID: String) async throws {
-        try await performOrganizationVerb(
-            capability: HostOperation.restore,
-            operation: "restore"
-        ) { backend in
-            _ = try await backend.restoreSession(sessionID: sessionID)
-        }
-    }
-
     func stopSession(_ sessionID: String) async throws {
         try await performOrganizationVerb(
             capability: HostOperation.stop,
@@ -3636,32 +3613,6 @@ extension RemoteHostRuntime {
         ) { backend in
             _ = try await backend.restartSession(sessionID: sessionID)
         }
-    }
-
-    /// The Host's legacy replacement receipt does not return the new Session
-    /// id. Latch correlation before Restore so an immediate bootstrap cannot
-    /// race ahead, then keep it through Restart until a unique replacement is
-    /// published. This is intentionally one selection intent at a time.
-    func restoreAndRestartSession(
-        _ source: RemoteSessionSummary,
-        knownSessionIDs: Set<String>
-    ) async throws {
-        try beginReplacementSelection(
-            source,
-            knownSessionIDs: knownSessionIDs,
-            operation: "restore and resume"
-        )
-
-        do {
-            try await restoreSession(source.id)
-        } catch {
-            // Restart was never submitted, so no replacement can appear.
-            pendingReplacementSelection = nil
-            replacementDefaultSelectionSuppressed = false
-            throw error
-        }
-
-        try await submitReplacementRestart(source.id)
     }
 
     private func beginReplacementSelection(
@@ -4020,19 +3971,6 @@ extension RemoteHostRuntime {
             }
         }
         return createdSessionID
-    }
-
-    /// One project's archived Sessions — a capability-gated read.
-    func archivedSessions(projectID: String) async throws -> [RemoteSessionSummary] {
-        let (connection, _) = try requireConnection(
-            capability: HostOperation.archiveList,
-            operation: "archived sessions"
-        )
-        do {
-            return try await connection.backend.listArchivedSessions(projectID: projectID)
-        } catch {
-            throw Self.verbError(from: error, operation: "archived sessions", isEffect: false)
-        }
     }
 
     /// One Session's Markdown transcript — a capability-gated read.

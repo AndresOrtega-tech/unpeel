@@ -33,7 +33,7 @@ source Session's owner but records the device that initiated the fork.
 This is only the persistence and attribution foundation for a future shared
 Host. Today all paired Controllers remain owner-equivalent. Per-principal
 Session filtering and authorization must land before non-owner Controller
-enrollment is safe: list/bootstrap/archive/output/artifacts and every Session
+enrollment is safe: list/bootstrap/output/artifacts and every Session
 effect must all enforce `request principal == session owner` on the Host.
 
 `HostedSessionManifest` in `session_host.rs` is the on-disk host record.
@@ -118,7 +118,7 @@ termination output is drained first. Never signal an unverified process group.
 - Each group (project, plain group, worktree, cwd bucket) can instead sort its
   sessions by shared lifecycle recency ("Recently updated" — pinned Sessions
   remain in their separate top section; live rows use the Recent rank, then
-  the capped stopped/archive preview forms a bottom section; no read-receipt
+  the capped stopped preview forms a bottom section; no read-receipt
   priority).
   The lifecycle timestamp is `created_at` as the floor, command-aware real
   activity (hook seed, otherwise parsed-screen change / legacy output), and
@@ -147,26 +147,23 @@ termination output is drained first. Never signal an unverified process group.
   ownership remains non-resumable. Ordinary **Resume** then creates a
   replacement Host. **Reload
   Terminal** remains the distinct maintenance/recovery action for replacing a
-  healthy live Host. Archived resumable Sessions use **Restore & Resume**;
-  a legacy unknown/non-resumable archive can only be restored. New archive
-  requests fail closed unless the exact managed launch has durable resume
-  evidence. Replacement paths retain the existing metadata/reference transfer
-  rules. Archive state deliberately does not carry when a Session is restored.
-  Remove prunes all shared references. See Resume recipes below.
+  healthy live Host. Replacement paths retain the existing
+  metadata/reference transfer rules. Remove prunes all shared references. See Resume recipes below.
 
 ### Recent ordering (sidebar + shared ⌘K/^K contract)
 
 The sidebar and both palettes use one lifecycle rank: working sessions
 (starting/busy) lead, then latest shared lifecycle timestamp. The sidebar
 adds its persistent filing structure around that rank: all live rows first,
-then a combined preview of naturally stopped rows followed by the most recent
-archived rows. The inactive preview is a user-set window
-(`sidebar_stopped_limit` remains the compatibility key in `app-state.json`,
-default 5, shared by the app's Settings ▸ Advanced ▸ Cleanup and, before its
-2026-09-03 removal, the TUI's Settings ▸ Cleanup). A Session that dies or stops on its own is never archived
-implicitly; past the preview it is hidden from the sidebar only and remains
-available through search/history until the user archives, resumes, removes, or
-pins it. Reading/marking a Session does not move it. Everything is derived
+then the most recent stopped rows. That window is also the **keep limit**
+("Stopped sessions to keep", Settings ▸ Advanced ▸ Cleanup;
+`sidebar_stopped_limit` remains the compatibility key in `app-state.json`,
+default 5 per group, 0 = none): the Host's retention sweep
+(`unpeel-serve/src/retention.rs`) removes stopped Sessions past it, never
+pinned or unread ones, re-checking under the lifecycle lock that each is
+still stopped (`session_ops::remove_stopped_session`) so a Resume wins. The
+sidebar is therefore the whole list; the provider's own history still holds
+removed conversations. Reading/marking a Session does not move it. Everything is derived
 from shared Host artifacts and `updatedAtUnixMs` is published to Controllers,
 so local, headless, and remote views do not invent their own recency from
 Controller-local files. The Rust helpers are
@@ -180,87 +177,46 @@ persisted start/input/finish/exit events newest-first. A session list can show
 only one row per session, so its lifecycle rank is the latest shared event that
 corresponds to that history.
 
-### Archiving sessions
+### Stopping sessions (archive removed)
 
-**Archive is the non-destructive "stop and file away" verb; Remove stays the
-destructive one — and it is also THE stop verb (the separate "Stop"
-context-menu item was folded into it 2026-08-05: the live-session item reads
-"Stop and archive"; `stopSession` survives for the phone).**
-Archiving stops the hosted PTY (the same identity-guarded
-kill path as Remove, plus `__browser_cleanup__`) but keeps the whole session
-dir — manifest, `output.bin`, artifacts, provider-id overlay — so the archive
-can use **Restore & Resume** to bring back the provider conversation via
-`ResumeCommand`. Plain **Restore** remains only for legacy archives created
-before exact resume evidence became mandatory.
-That
-replacement does not carry the old terminal scrollback; the saved output is
-readable only until replacement Resume removes the old Session directory. The
-shared `archived.json` marker inside the Session directory is the
-cross-frontend truth. The native UserDefaults overlay
-(`NativeOverlay.archivedSessionsKey`) remains a compatibility/cache layer and
-is adopted from markers during rescan. Archive state is pruned on true removal
-and deliberately NOT carried across replacement Resume (resuming an archived
-session is "bring it back").
+**Stop is the non-destructive end of a Session; Remove stays the destructive
+one.** There is no archive (removed in protocol minor 23): agent terminals
+have Resume, so a stopped Session simply stays in the sidebar as a resumable
+stopped row. Stop ends the hosted PTY (the same identity-guarded kill path as
+Remove, plus `__browser_cleanup__`) and keeps the Session dir's manifest,
+title, artifacts, and provider id — but truncates `output.bin`: Resume starts
+a replacement terminal and never replays the old journal, and kept journals
+were what grew `app-sessions/` into gigabytes. A Session that exits on its own
+keeps its output (it may explain why it died). Each `unpeel serve` worker
+start migrates legacy `archived.json` Sessions to plain stopped rows
+(`session_ops::migrate_archived_sessions`: marker and scrollback dropped).
 
-**Sidebar model (reworked 2026-08-05, `sidebarLists` in `UnpeelStore`):**
-each project's list is ACTIVE (live) subtree blocks first — never truncated —
-then naturally stopped blocks followed by archived blocks, with that combined
-inactive tail capped at `sidebarVisibleSessionLimit`; the default is 5.
-Selected, unread, keep-visible, and in-flight inactive blocks always stay past
-the cap.
+**Sidebar model (`sidebarLists` in `UnpeelStore`):** each project's list is
+pins, then ACTIVE (live) subtree blocks — never truncated — then stopped
+blocks capped at `sidebarVisibleSessionLimit` (the keep limit above); the
+default is 5. Unread stopped rows stay past the cap and are never removed.
 "Recently updated" applies the shared lifecycle rank inside the live and
-naturally stopped sections without removing the archive boundary. A user-initiated
-archive stamps recency
-(`NativeOverlay.archivedAtKey`) so the row glides to the TOP of the fixed
-bottom archive section (live hosts first show a muted spinner
-"archiving" row via `archivingSessionIDs` while stopping). The final exited
-manifest timestamp also makes a newly stopped row recent, but never archives
-it. Hidden natural stops remain searchable; only a real `archived.json` marker
-places a Session in the archive library,
-opened from the project context menu's **"Archived (N)"** on desktop (the
-now-removed TUI used **`a`** or the same menu) — there is no sidebar footer row
-(2026-08-10; the row itself
-had replaced "Show N more"; the show-all state and
-`UNPEEL_SHOW_ALL_SESSIONS` snapshot hook are gone). Recent archived rows
-therefore DO render in the sidebar (primary action: "Restore & Resume";
-plain "Restore" is retained for legacy unknown/non-resumable archives and does
-not relaunch them).
-**Archive wins over Session pin/manual order:** an archived Session always
-renders in the fixed bottom archive section, newest-filed first, and exposes no
-drag slots. Its durable pin/order metadata is retained so restoring it returns
-the row to the prior regular section. Plain-group pins affect only sibling
-display order; they do not alter Session ownership or archive state.
-The phone mirrors the model: the snapshot sends the same
-displayed list (`displayedSessions` per node, `archived` flag on
-`RemoteSessionSummary`), and the iOS sidebar applies the same
-partition/window itself so it also behaves against older Macs; the phone's
-"Show more" is gone and its session sheet offers Stop and archive, **Restore &
-Resume** for a resumable archive, or plain **Restore** otherwise (standalone
-Stop only against Macs without archive support).
-Entry points: the row's hover
-archive button and the context-menu item (`requestArchiveSession` — actively
-working sessions get an inline "Stop and archive?" confirm; settled ones
-archive directly). Archive is offered only when the launch names a managed
-runtime with a resume recipe AND this exact Session has durable provider-owned
-state: a non-empty provider transcript, a real lifecycle event paired with its
-provider id, or populated managed per-Session storage. A pre-minted id or empty
-directory alone is not enough. Non-resumable rows show Remove/X instead, and
-the Host revalidates the same evidence before accepting an archive request.
-Neither inactivity cleanup nor natural process exit archives such a Session.
-The single
-Settings ▸ Advanced ▸ Cleanup picker (2026-08-12: the old separate
-auto-stop-minutes and auto-archive-days pair was merged) is **"Auto-stop
-and archive inactive terminals"**: sessions continuously idle past the
-cutoff get the same `archiveSession` treatment as clicking "Stop and
-archive" — skipping pinned, selected, unread, busy/attention, and any Session
-without exact durable resume evidence — and never delete anything. Its continuous-idle clock
-uses the same shared lifecycle timestamp as Recently updated; raw terminal
-repaints cannot keep a hook-owned idle agent alive forever. The knob is shared
-state: `auto_stop_archive_minutes` in `app-state.json` (absent = on at 1 day,
-explicit 0 = off; the app folds its legacy
-`unpeel.native.autoSessionStopMinutes` UserDefaults value in once); the sweep
-now runs in the `unpeel-serve` driver (`auto_archive.rs`), previously also in
-the now-removed TUI.
+stopped sections; the final exited manifest timestamp makes a newly stopped
+row recent. The phone mirrors the model from the same Host snapshot.
+
+Stop vs Remove is offered from Host resume evidence, published as
+`capabilities.resumable` on every Session summary: the launch names a managed
+runtime with a resume recipe AND this exact Session has durable
+provider-owned state (a non-empty provider transcript, a real lifecycle event
+paired with its provider id, or populated managed per-Session storage). A
+pre-minted id or empty directory alone is not enough. Non-resumable live rows
+offer Remove instead. Older Controllers still send the retired
+`archived: true` organization patch; the Host runs Stop for it.
+
+The single Settings ▸ Advanced ▸ Cleanup picker is **"Auto-stop inactive
+terminals"**: resumable sessions continuously idle past the cutoff get Stop —
+skipping pinned, unread-attention, busy, and any Session without exact
+durable resume evidence — and never delete anything. Its continuous-idle
+clock uses the same shared lifecycle timestamp as Recently updated; raw
+terminal repaints cannot keep a hook-owned idle agent alive forever. The knob
+is shared state: `auto_stop_archive_minutes` in `app-state.json` (the key
+keeps its archive-era name; absent = on at 1 day, explicit 0 = off); the
+sweep runs in the `unpeel-serve` driver (`auto_stop.rs`).
 
 ### Restart Recommendation API
 
@@ -343,7 +299,7 @@ the completion wrapper returns control. This preserves terminal output and
 scrollback but does not add a promised entry to the user's shell command
 history.
 
-- **Hook-captured precise** (every provider whose integration is installed; the capture also records which runtime spoke, `provider_runtime` in `provider-session.json`, so a hand-typed agent in a blank terminal is transcript-backed and auto-titled exactly like a preset launch — `transcripts::transcript_provider_for_manifest` resolves launch command → captured runtime → live observation): the provider forwards its conversation id in hook POSTs (`session_id`/`thread_id`/`conversation_id`…). The native hook server captures it (`HookEvent.providerSessionID`, `HookServer.swift`) and `UnpeelStore` persists a `unpeel-id → provider-id` map in a UserDefaults overlay (`NativeOverlay.providerSessionIDsKey`), pruned with the session in `pruneNativeState`; replacement Resume reads it **before** the prune, with the manifest's `provider_session_id` as fallback. Precise forms per CLI: `claude`/`gemini`/`grok`/`cursor-agent`/`copilot --resume <id>`, `cline --id <id>`, `codex resume <id>`, `amp threads continue <id>`, `opencode --session <id>`. Capture is latest-wins and outranks an id the user wrote into the launch command, so a user who switches conversations *inside* the tool (`/resume`, `/clear`) re-targets later resume to the conversation they actually ended up in; claude reports the switch immediately (its `SessionStart` hook, forwarded as metadata-only `HookSeen`, fires on in-tool resume/clear with the new id), other providers on their next hook-bearing event. Nothing mints an id at launch any more: a command runs exactly as typed, and the first hook event is what makes a Session precisely resumable (and archivable).
+- **Hook-captured precise** (every provider whose integration is installed; the capture also records which runtime spoke, `provider_runtime` in `provider-session.json`, so a hand-typed agent in a blank terminal is transcript-backed and auto-titled exactly like a preset launch — `transcripts::transcript_provider_for_manifest` resolves launch command → captured runtime → live observation): the provider forwards its conversation id in hook POSTs (`session_id`/`thread_id`/`conversation_id`…). The native hook server captures it (`HookEvent.providerSessionID`, `HookServer.swift`) and `UnpeelStore` persists a `unpeel-id → provider-id` map in a UserDefaults overlay (`NativeOverlay.providerSessionIDsKey`), pruned with the session in `pruneNativeState`; replacement Resume reads it **before** the prune, with the manifest's `provider_session_id` as fallback. Precise forms per CLI: `claude`/`gemini`/`grok`/`cursor-agent`/`copilot --resume <id>`, `cline --id <id>`, `codex resume <id>`, `amp threads continue <id>`, `opencode --session <id>`. Capture is latest-wins and outranks an id the user wrote into the launch command, so a user who switches conversations *inside* the tool (`/resume`, `/clear`) re-targets later resume to the conversation they actually ended up in; claude reports the switch immediately (its `SessionStart` hook, forwarded as metadata-only `HookSeen`, fires on in-tool resume/clear with the new id), other providers on their next hook-bearing event. Nothing mints an id at launch any more: a command runs exactly as typed, and the first hook event is what makes a Session precisely resumable.
 - **Older managed storage**: launches from earlier builds pinned pi to `--session-dir ~/.unpeel/pi-sessions/<session-id>`. Such a command keeps its directory across resumes and `confirmRemoveSession` still reaps it on true removal (`unpeelManagedPiSessionDir`); new pi launches run as typed and resume with pi's own `--continue`.
 
 Sessions with none of the above (or launched by older builds before an id was captured) fall back to the provider's **continue-last** flag (`codex resume --last`, `gemini --resume latest`, `amp threads continue --last`, `--continue`). Exact for worktree sessions (own cwd); in a shared project root it resumes whichever conversation ran there most recently. Cline is the exception: it has no continue-last flag, so an older id-less session opens `cline history` for an explicit choice.

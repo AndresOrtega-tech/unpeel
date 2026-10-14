@@ -3,10 +3,9 @@ import UnpeelShared
 
 /// Folder organize sheet, opened by long-pressing a sidebar project/group
 /// row — the phone's take on the desktop project context menu: rename
-/// (groups only), per-group session sort, folder color, and the archive
-/// library. Saves through POST /mobile/project-organization (capability
-/// `project.organization.set`); against an older Mac only the archive
-/// library shows.
+/// (groups only), per-group session sort, and folder color. Saves through
+/// POST /mobile/project-organization (capability `project.organization.set`);
+/// against an older Mac the sheet only asks for an update.
 struct ProjectOrganizeSheet: View {
     var store: RemotePreviewStore
     let project: RemoteProjectSummary
@@ -67,10 +66,6 @@ struct ProjectOrganizeSheet: View {
         dateSorted == (project.dateSorted ?? false) ? nil : dateSorted
     }
 
-    private var archivedCount: Int {
-        project.archivedSessionCount ?? 0
-    }
-
     var body: some View {
         NavigationStack {
             Form {
@@ -104,20 +99,7 @@ struct ProjectOrganizeSheet: View {
                     }
                 }
 
-                if archivedCount > 0 {
-                    Section {
-                        Button {
-                            store.archiveLibraryProjectID = project.id
-                            store.topBarSheet = .archive
-                        } label: {
-                            Label("Archived (\(archivedCount))", systemImage: "archivebox")
-                        }
-                    } footer: {
-                        Text("Older sessions filed away on your Mac — restore or resume them anytime.")
-                    }
-                }
-
-                if !canEdit, archivedCount == 0 {
+                if !canEdit {
                     Section {
                         Text("Update Unpeel on your Mac to organize folders from the phone.")
                             .foregroundStyle(.secondary)

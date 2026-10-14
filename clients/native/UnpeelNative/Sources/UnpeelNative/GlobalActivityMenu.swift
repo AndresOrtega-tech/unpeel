@@ -56,7 +56,7 @@ struct WorkspaceActivityMenuSlice: Equatable {
         }
 
         var seen = Set<String>()
-        for summary in snapshot.sessions where !summary.archived {
+        for summary in snapshot.sessions {
             guard seen.insert(summary.id).inserted else { continue }
             let item = WorkspaceActivityMenuSession(
                 sessionID: summary.id,

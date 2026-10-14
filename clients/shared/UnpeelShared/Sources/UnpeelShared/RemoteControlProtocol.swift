@@ -5,7 +5,7 @@ import Security
 public enum RemoteControlProtocol {
     public static let version = 1
     public static let hostMajorVersion = 1
-    public static let hostMinorVersion = 22
+    public static let hostMinorVersion = 23
     public static let gitSettingsReadCapability = "settings.git.read"
     public static let gitSettingsSetCapability = "settings.git.set"
     public static let resumableArtifactUploadCapability = "artifact.upload.resumable"
@@ -450,10 +450,6 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
     public let gitBranch: String?
     public let mcpBlocked: Bool
     public let sortOrder: Int?
-    /// How many archived sessions this project's archive library holds, for
-    /// the phone's project-organize library entry. Absent on older Macs =>
-    /// hide the entry (they don't serve /mobile/archive either).
-    public let archivedSessionCount: Int?
     /// Whether this project's sessions are date-sorted (newest first) instead
     /// of the manual drag order. Optional for wire compatibility: older Hosts
     /// omit it, which reads as the default custom order.
@@ -477,7 +473,6 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
         gitBranch: String? = nil,
         mcpBlocked: Bool = false,
         sortOrder: Int? = nil,
-        archivedSessionCount: Int? = nil,
         dateSorted: Bool? = nil,
         sessionOrder: [String]? = nil
     ) {
@@ -493,7 +488,6 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
         self.gitBranch = gitBranch
         self.mcpBlocked = mcpBlocked
         self.sortOrder = sortOrder
-        self.archivedSessionCount = archivedSessionCount
         self.dateSorted = dateSorted
         self.sessionOrder = sessionOrder
     }
@@ -512,22 +506,9 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
             gitBranch: gitBranch,
             mcpBlocked: mcpBlocked,
             sortOrder: sortOrder,
-            archivedSessionCount: archivedSessionCount,
             dateSorted: dateSorted,
             sessionOrder: sessionOrder
         )
-    }
-}
-
-/// GET /mobile/archive?project_id= — one project's archived sessions,
-/// Mac-resolved like every session summary (newest first).
-public struct RemoteArchivedSessionsResponse: Codable, Equatable, Sendable {
-    public let projectID: String
-    public let sessions: [RemoteSessionSummary]
-
-    public init(projectID: String, sessions: [RemoteSessionSummary]) {
-        self.projectID = projectID
-        self.sessions = sessions
     }
 }
 
@@ -591,28 +572,30 @@ public struct RemoteSessionCapabilities: Codable, Equatable, Sendable {
     /// The CLI reports turn completion through lifecycle hooks, so a
     /// "notify when done" push is reliable.
     public let notifyWhenDone: Bool
-    /// The Mac supports the archive verb (`archived` on the organization
-    /// patch): non-destructive stop + move to the project's Archived section.
-    /// Defaults to false when decoding payloads from older Macs, so the
-    /// phone hides Archive instead of offering a silent no-op.
-    public let archive: Bool
+    /// The Host holds resume evidence for this Session (live or stopped
+    /// row): stopping it keeps a row that can Resume. Older Hosts carried
+    /// the same evidence as the retired `archive` offer; absent both, false.
+    public let resumable: Bool
 
     public init(
         restart: Bool,
         restartAgent: Bool? = nil,
         resumeAgent: Bool? = nil,
         notifyWhenDone: Bool,
-        archive: Bool = false
+        resumable: Bool = false
     ) {
         self.restart = restart
         self.restartAgent = restartAgent
         self.resumeAgent = resumeAgent
         self.notifyWhenDone = notifyWhenDone
-        self.archive = archive
+        self.resumable = resumable
     }
 
     enum CodingKeys: String, CodingKey {
-        case restart, restartAgent, resumeAgent, fork, appendSystemContext, notifyWhenDone, archive
+        case restart, restartAgent, resumeAgent, fork, appendSystemContext, notifyWhenDone
+        case resumable
+        /// Retired archive offer: decode-only fallback for `resumable`.
+        case archive
     }
 
     public init(from decoder: Decoder) throws {
@@ -625,7 +608,11 @@ public struct RemoteSessionCapabilities: Codable, Equatable, Sendable {
         _ = try c.decodeIfPresent(Bool.self, forKey: .fork)
         _ = try c.decodeIfPresent(Bool.self, forKey: .appendSystemContext)
         notifyWhenDone = try c.decode(Bool.self, forKey: .notifyWhenDone)
-        archive = try c.decodeIfPresent(Bool.self, forKey: .archive) ?? false
+        // Older Hosts offered archive exactly when they held resume
+        // evidence; current Hosts send `resumable` and pin `archive` false.
+        resumable = try c.decodeIfPresent(Bool.self, forKey: .resumable)
+            ?? c.decodeIfPresent(Bool.self, forKey: .archive)
+            ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -637,7 +624,7 @@ public struct RemoteSessionCapabilities: Codable, Equatable, Sendable {
         try c.encode(false, forKey: .fork)
         try c.encode(false, forKey: .appendSystemContext)
         try c.encode(notifyWhenDone, forKey: .notifyWhenDone)
-        try c.encode(archive, forKey: .archive)
+        try c.encode(resumable, forKey: .resumable)
     }
 }
 
@@ -693,10 +680,6 @@ public struct RemoteSessionSummary: Codable, Equatable, Identifiable, Sendable {
     /// Verb support for this session's CLI (see RemoteSessionCapabilities).
     /// Absent on older Macs.
     public let capabilities: RemoteSessionCapabilities?
-    /// Whether this session is archived on the Mac (a recent archive still
-    /// showing in the sidebar's stopped group). Absent on older Macs ⇒ false
-    /// (older Macs never send archived sessions at all).
-    public let archived: Bool
     /// The CLI's brand/spinner tint (0xRRGGBB), resolved on the Mac — the
     /// single source of truth (`Theme.toolSpinnerColor`), so a new CLI's
     /// color reaches phones without an app update. Nil = older Mac or no
@@ -758,7 +741,6 @@ public struct RemoteSessionSummary: Codable, Equatable, Identifiable, Sendable {
         notifyWhenDone: Bool = false,
         terminalBackgroundHex: Int? = nil,
         capabilities: RemoteSessionCapabilities? = nil,
-        archived: Bool = false,
         spinnerColorHex: Int? = nil,
         activeAppID: String? = nil,
         activeAppName: String? = nil,
@@ -795,7 +777,6 @@ public struct RemoteSessionSummary: Codable, Equatable, Identifiable, Sendable {
         self.notifyWhenDone = notifyWhenDone
         self.terminalBackgroundHex = terminalBackgroundHex
         self.capabilities = capabilities
-        self.archived = archived
         self.spinnerColorHex = spinnerColorHex
         self.activeAppID = activeAppID
         self.activeAppName = activeAppName
@@ -817,7 +798,7 @@ public struct RemoteSessionSummary: Codable, Equatable, Identifiable, Sendable {
         case createdAtUnixMs, ownerPrincipalID, createdByDeviceID, sourcePresetID
         case updatedAtUnixMs, status, activity
         case unread, pinned, worktreePath, worktreeBranch, parentSessionID, lastOutputPreview
-        case notifyWhenDone, terminalBackgroundHex, capabilities, archived
+        case notifyWhenDone, terminalBackgroundHex, capabilities
         case spinnerColorHex
         case activeAppID, activeAppName, activeAppTintHex
         case hostStartedAtUnixMs
@@ -855,7 +836,6 @@ public struct RemoteSessionSummary: Codable, Equatable, Identifiable, Sendable {
         notifyWhenDone = try c.decodeIfPresent(Bool.self, forKey: .notifyWhenDone) ?? false
         terminalBackgroundHex = try c.decodeIfPresent(Int.self, forKey: .terminalBackgroundHex)
         capabilities = try c.decodeIfPresent(RemoteSessionCapabilities.self, forKey: .capabilities)
-        archived = try c.decodeIfPresent(Bool.self, forKey: .archived) ?? false
         spinnerColorHex = try c.decodeIfPresent(Int.self, forKey: .spinnerColorHex)
         activeAppID = try c.decodeIfPresent(String.self, forKey: .activeAppID)
         activeAppName = try c.decodeIfPresent(String.self, forKey: .activeAppName)
@@ -2477,6 +2457,8 @@ public struct RemoteWorkspaceSettingsPatch: Codable, Equatable, Sendable {
     public let appearanceSettings: RemoteAppearanceSettingsUpdate?
     public let notificationSettings: RemoteNotificationSettingsUpdate?
     public let experimentalSettings: RemoteExperimentalSettingsUpdate?
+    /// Auto-stop inactive terminals after this many minutes. The wire key
+    /// keeps its legacy name for compatibility; archive itself is gone.
     public let autoStopArchiveMinutes: Int?
     public let sidebarStoppedLimit: Int?
     public let browserDefaultAccess: String?
@@ -2541,6 +2523,8 @@ public struct RemoteWorkspaceSettings: Codable, Equatable, Sendable {
     public let appearanceSettings: RemoteAppearanceSettings?
     public let notificationSettings: RemoteNotificationSettings?
     public let experimentalSettings: RemoteExperimentalSettings?
+    /// Auto-stop inactive terminals after this many minutes. The wire key
+    /// keeps its legacy name for compatibility; archive itself is gone.
     public let autoStopArchiveMinutes: Int
     public let sidebarStoppedLimit: Int
     public let browserDefaultAccess: String
@@ -2588,7 +2572,6 @@ public struct RemoteSessionOrganizationPatch: Codable, Equatable, Sendable {
     public let sessionID: String
     public let title: String?
     public let pinned: Bool?
-    public let archived: Bool?
     /// Opt this session in/out of a "finished" push notification. Nil = leave
     /// unchanged (only title/pin/etc. being patched).
     public let notifyWhenDone: Bool?
@@ -2602,20 +2585,18 @@ public struct RemoteSessionOrganizationPatch: Codable, Equatable, Sendable {
         sessionID: String,
         title: String? = nil,
         pinned: Bool? = nil,
-        archived: Bool? = nil,
         notifyWhenDone: Bool? = nil,
         projectID: String? = nil
     ) {
         self.sessionID = sessionID
         self.title = title
         self.pinned = pinned
-        self.archived = archived
         self.notifyWhenDone = notifyWhenDone
         self.projectID = projectID
     }
 
     enum CodingKeys: String, CodingKey {
-        case sessionID, title, pinned, archived, notifyWhenDone, projectID
+        case sessionID, title, pinned, notifyWhenDone, projectID
     }
 
     public init(from decoder: Decoder) throws {
@@ -2623,7 +2604,6 @@ public struct RemoteSessionOrganizationPatch: Codable, Equatable, Sendable {
         sessionID = try c.decode(String.self, forKey: .sessionID)
         title = try c.decodeIfPresent(String.self, forKey: .title)
         pinned = try c.decodeIfPresent(Bool.self, forKey: .pinned)
-        archived = try c.decodeIfPresent(Bool.self, forKey: .archived)
         notifyWhenDone = try c.decodeIfPresent(Bool.self, forKey: .notifyWhenDone)
         projectID = try c.decodeIfPresent(String.self, forKey: .projectID)
     }

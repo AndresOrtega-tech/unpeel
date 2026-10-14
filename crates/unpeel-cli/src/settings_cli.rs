@@ -25,7 +25,7 @@ Script this workspace's allowlisted settings:
   mcp_worktree_access                  true | false
   mcp_auto_add_browser_screenshots     true | false
   auto_stop_archive_minutes            0 | 30 | 60 | 120 | 240 | 480 | 1440
-  sidebar_stopped_limit                0 | 3 | 5 | 10 | 15 | 25
+  sidebar_stopped_limit                0 | 3 | 5 | 10 | 15 | 25 (stopped sessions kept per group)
   theme                                system | light | dark
 
 The Sessions and Browser MCP gates are captured when a Session launches.
@@ -224,7 +224,7 @@ impl SettingKey {
                     .get("auto_stop_archive_minutes")
                     .and_then(Value::as_u64)
                     .filter(|minutes| AUTO_STOP_MINUTE_OPTIONS.contains(minutes))
-                    .unwrap_or(unpeel_serve::auto_archive::DEFAULT_MINUTES)
+                    .unwrap_or(unpeel_serve::auto_stop::DEFAULT_MINUTES)
                     .into(),
             ),
             Self::SidebarStoppedLimit => Value::Number(
