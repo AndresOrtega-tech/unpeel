@@ -162,8 +162,12 @@ default 5 per group, 0 = none): the Host's retention sweep
 (`unpeel-serve/src/retention.rs`) removes stopped Sessions past it, never
 pinned or unread ones, re-checking under the lifecycle lock that each is
 still stopped (`session_ops::remove_stopped_session`) so a Resume wins. The
-sidebar is therefore the whole list; the provider's own history still holds
-removed conversations. Reading/marking a Session does not move it. Everything is derived
+sweep also never removes a Session holding files that exist nowhere else
+(anything under `artifacts/`, or runtime storage pinned under the Unpeel
+home such as a pre-0.7 Pi session dir); those stay on disk until the user
+removes them, and the sweep re-checks them every ten minutes. Otherwise the
+sidebar is the whole list; the provider's own history still holds removed
+conversations. Reading/marking a Session does not move it. Everything is derived
 from shared Host artifacts and `updatedAtUnixMs` is published to Controllers,
 so local, headless, and remote views do not invent their own recency from
 Controller-local files. The Rust helpers are

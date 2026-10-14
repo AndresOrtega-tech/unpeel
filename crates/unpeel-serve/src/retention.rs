@@ -7,12 +7,15 @@
 //!
 //! One batch is in flight at a time, each removal re-checks under the
 //! Session's lifecycle lock that it is still stopped (a Resume wins), and a
-//! failed removal backs off for a minute.
+//! failed removal backs off for a minute. A row left alone — resumed, or
+//! holding artifacts or Pi storage the sweep never deletes — is re-checked
+//! every ten minutes rather than every tick.
 
 use std::collections::HashMap;
 use std::sync::mpsc;
 
 const RETRY_DELAY_MS: u64 = 60_000;
+const KEPT_RECHECK_MS: u64 = 600_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetentionEvent {
@@ -38,7 +41,10 @@ impl Retention {
                     for (session_id, result) in outcomes {
                         match result {
                             Ok(true) => events.push(RetentionEvent::Removed(session_id)),
-                            Ok(false) => {}
+                            Ok(false) => {
+                                self.retry_after_ms
+                                    .insert(session_id, now_ms + KEPT_RECHECK_MS);
+                            }
                             Err(error) => {
                                 self.retry_after_ms
                                     .insert(session_id.clone(), now_ms + RETRY_DELAY_MS);

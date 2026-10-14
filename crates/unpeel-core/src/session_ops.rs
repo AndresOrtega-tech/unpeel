@@ -2012,16 +2012,38 @@ pub fn remove_session(session_id: &str) -> Result<(), String> {
 /// Retention's Remove (`unpeel-serve` keep limit): delete a Session only if
 /// it is still stopped under its lifecycle lock, so a concurrent Resume or
 /// Reload always wins over the sweep. `Ok(false)` means it was left alone.
+/// The sweep never deletes what exists nowhere else: a Session holding
+/// artifacts or runtime storage under the Unpeel home (Pi's pinned session
+/// dir) is kept until the user removes it.
 pub fn remove_stopped_session(session_id: &str) -> Result<bool, String> {
     let _lifecycle_lock = lock_session_lifecycle(session_id)?;
-    if !load_manifest(session_id)
-        .is_some_and(|manifest| manifest.state == HostedSessionState::Exited)
-    {
+    let Some(manifest) =
+        load_manifest(session_id).filter(|manifest| manifest.state == HostedSessionState::Exited)
+    else {
+        return Ok(false);
+    };
+    if holds_files_only_unpeel_has(&session_dir(session_id), &manifest) {
         return Ok(false);
     }
     validate_shared_session_reference_files()?;
     remove_session_unlocked(session_id)?;
     Ok(true)
+}
+
+fn holds_files_only_unpeel_has(dir: &Path, manifest: &HostedSessionManifest) -> bool {
+    dir_holds_a_file(&dir.join("artifacts"), 8)
+        || managed_storage_for_manifest(manifest).is_some_and(|path| path.exists())
+}
+
+fn dir_holds_a_file(dir: &Path, depth: usize) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| match entry.file_type() {
+        Ok(kind) if kind.is_dir() => depth > 0 && dir_holds_a_file(&entry.path(), depth - 1),
+        Ok(_) => true,
+        Err(_) => false,
+    })
 }
 
 /// Caller holds this Session's lifecycle lock. Failure recovery deliberately
@@ -2593,6 +2615,17 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(raw["project_colors"], serde_json::json!({}));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retention_sees_artifacts_only_when_a_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = dir.path().join("artifacts");
+        assert!(!super::dir_holds_a_file(&artifacts, 8));
+        std::fs::create_dir_all(artifacts.join("browser/downloads")).unwrap();
+        assert!(!super::dir_holds_a_file(&artifacts, 8));
+        std::fs::write(artifacts.join("browser/downloads/shot.png"), b"png").unwrap();
+        assert!(super::dir_holds_a_file(&artifacts, 8));
     }
 
     #[test]
