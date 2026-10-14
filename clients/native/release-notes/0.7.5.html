@@ -1,0 +1,18 @@
+<h2>Unpeel 0.7.5</h2>
+<ul>
+  <li><b>Archive is gone; Stop keeps a resumable row.</b> Stopping a session leaves it in the sidebar's stopped list with Resume and drops its old scrollback. Archived sessions kept their terminal output forever (about a gigabyte on a daily-driver Mac) and slowed every rescan; the ones you have become stopped rows on update. Stopped sessions beyond <i>Stopped sessions to keep</i> (5 per group by default) are removed; pinned and unread ones stay, and the agent's own history still holds the conversation.</li>
+  <li><b>Settings &#9656; Git.</b> Sign in to GitHub with a device code and set your Git name and email for the selected workspace's Host, including a remote Mac. Credentials stay in that Host's account and never travel to the app.</li>
+  <li><b>Agents report their own status.</b> Programs that speak the Program Status Protocol (OSC 7501), including Claude Code 2.1, now tell Unpeel directly when they are working, done, blocked, or failed. That is more precise than hooks, which remain the fallback for other agents.</li>
+  <li><b>Agent access per session.</b> Right-click an agent session &#9656; Agent access: <b>Read</b> (the default), <b>Write</b> (types into other sessions without asking), or <b>Create &amp; remove</b> (can also start sessions and close the ones it started). A change reaches a running agent without a restart.</li>
+  <li><b>New sessions in other workspaces show up at once,</b> selected and marked as starting, instead of appearing a moment later unselected.</li>
+  <li><b>&#8984;K works while another Host is selected.</b></li>
+  <li><b>Fit to phone works in every workspace.</b> It was ignored for sessions outside your main workspace.</li>
+</ul>
+<h3>Also in 0.7.4</h3>
+<ul>
+  <li><b>&#8984;K opens in every workspace.</b> The command palette was reachable only in your main workspace. It now opens in every scope and leads with what is spinning or done across all of your workspaces &mdash; the same activity the Recent-activity dropdown shows &mdash; and jumping to one of those rows switches to its workspace.</li>
+  <li><b>Sessions stuck after a full disk can be removed.</b> When the disk filled up, a session could stay <i>running</i> forever with a dead child and no control socket, and "Couldn't remove the session". Such a session now ends cleanly, its exited state lands once space returns, and Remove works. A session whose host stopped answering can also be stopped and removed even when its child can't be verified.</li>
+  <li><b>Group renames stick.</b> Renaming a sidebar group through the Host survives relaunch instead of reverting.</li>
+  <li><b>See why a paired Mac is out of reach.</b> When a paired Mac is on another network, the reason now says to use Unpeel Link or set up Tailscale, rather than failing silently.</li>
+  <li><b>Pairing on iPad.</b> The pairing sheet now presents correctly on iPad.</li>
+</ul>
