@@ -57,7 +57,9 @@ makes sense for coding, it does not belong here.
   session is a hosted PTY with `manifest.json`, an append-only `output.bin`
   journal, and a `session.sock` control socket under
   `~/.unpeel/app-sessions/<id>/`. Sessions run as threads of one detached
-  PTY core per workspace (`docs/agents/pty-core.md`).
+  PTY core per workspace (`docs/agents/pty-core.md`). Core-wide I/O state,
+  including the reactor's read buffer, must survive any Session stopping
+  or panicking so sibling Sessions keep reading and journaling output.
 - **Process identity before any signal.** Every kill/reap path verifies a
   live pid against its recorded kernel start time (`pid_started_at`). Under
   agent load the pid counter wraps in under an hour; an unverified kill

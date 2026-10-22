@@ -195,6 +195,29 @@ def body(case):
     )
     case.check("the core is empty again", wait_core_sessions(home, 0), str(core_sessions(home)))
 
+    # Stopping earlier Sessions must not discard the reactor's shared read
+    # buffer: a later Session must still read and journal its PTY output.
+    after_stop = new_session(case, home, "after stopping earlier sessions")
+    sent = run_cli(home, ["send", after_stop, "hello-after-stop", "--enter"])
+    deadline = time.monotonic() + 10
+    output_path = home.path("app-sessions", after_stop, "output.bin")
+    output = b""
+    while time.monotonic() < deadline:
+        with open(output_path, "rb") as handle:
+            output = handle.read()
+        if b"hello-after-stop" in output:
+            break
+        time.sleep(0.1)
+    case.check(
+        "new sessions still journal output after earlier sessions stop",
+        sent.returncode == 0
+        and b"hello-after-stop" in output
+        and home.manifests().get(after_stop, {}).get("state") == "running",
+        sent.stderr[:200] + repr(output[:200]),
+    )
+    run_cli(home, ["rm", after_stop], timeout=45)
+    case.check("the core releases the later session", wait_core_sessions(home, 0))
+
     # Fallback 1: UNPEEL_PTY_CORE=0 forces a per-process Host even with a core up.
     forced = new_session(case, home, "forced per-process", env={"UNPEEL_PTY_CORE": "0"})
     hosts = per_process_hosts(home)

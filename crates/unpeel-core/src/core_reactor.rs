@@ -1352,7 +1352,14 @@ fn _assert_send() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixStream;
+    use crate::session_host::session_io::{
+        HandedOverChild, JobSeed, JournalHandle, PtyWriter, SessionExitPlan, SessionShared,
+    };
+    use crate::session_host::{HostRuntime, OutputBroadcaster, RecentWriteIds};
+    use crate::terminal_viewport::TerminalViewportState;
+    use std::io::{self, Read};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::{AtomicU64, AtomicUsize};
 
     fn reactor_handle_stub() -> ReactorHandle {
         let (control_tx, _control_rx) = mpsc::channel();
@@ -1360,6 +1367,134 @@ mod tests {
             control_tx,
             waker: Arc::new(Waker::new().unwrap()),
         }
+    }
+
+    fn session_with_reader(
+        reader: impl Read + Send + 'static,
+        journal_tx: mpsc::Sender<JournalMsg>,
+    ) -> (SessionIo, tempfile::TempDir) {
+        let dir = tempfile::Builder::new()
+            .prefix("ucr-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let socket_path = dir.path().join("s.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .unwrap();
+        let fd = pair.master.as_raw_fd().unwrap();
+        let writer = PtyWriter::new(pair.master.take_writer().unwrap(), fd);
+        let runtime = Arc::new(Mutex::new(HostRuntime {
+            master: pair.master,
+            writer,
+            child: Box::new(HandedOverChild::new(0, None)),
+            pty_cols: 80,
+            pty_rows: 24,
+            shell_executable: "/bin/sh".into(),
+            last_runtime_observation: None,
+            recent_write_ids: RecentWriteIds::default(),
+            hook_input: crate::hook_cancellation::InputTracker::default(),
+        }));
+        let shared = Arc::new(SessionShared {
+            session_id: "reactor-read-test".into(),
+            runtime,
+            viewport: Arc::new(Mutex::new(TerminalViewportState::new(80, 24))),
+            running: Arc::new(AtomicBool::new(true)),
+            broadcaster: Arc::new(Mutex::new(OutputBroadcaster::at_offset(0))),
+            title_buffer: Arc::new(Mutex::new(String::new())),
+            title_done: Arc::new(AtomicBool::new(false)),
+            has_been_written_to: Arc::new(AtomicBool::new(false)),
+            agent_restart_lock: Arc::new(Mutex::new(())),
+            runtime_generation: Arc::new(AtomicU64::new(1)),
+            pending_runtime_generation: Arc::new(AtomicU64::new(0)),
+            reactor: reactor_handle_stub(),
+            slot: AtomicUsize::new(0),
+        });
+        let journal = JournalHandle {
+            id: 1,
+            tx: journal_tx,
+            pressure: Arc::new(JournalBackpressure::default()),
+            failed: Arc::new(AtomicBool::new(false)),
+        };
+        let exit = SessionExitPlan {
+            pid: None,
+            pid_started_at: None,
+            host_build_id: None,
+            session_socket_path: socket_path,
+            on_exit: Box::new(|_| {}),
+        };
+        let seed = JobSeed {
+            command: String::new(),
+            shell: "/bin/sh".into(),
+            pid: None,
+            pid_started_at: None,
+        };
+        (
+            SessionIo::new(
+                shared,
+                fd,
+                Box::new(reader),
+                listener,
+                true,
+                journal,
+                vec![],
+                exit,
+                seed,
+            ),
+            dir,
+        )
+    }
+
+    fn assert_next_session_journals(registry: &mut Registry) {
+        let (tx, rx) = mpsc::channel();
+        let (mut next, _dir) = session_with_reader(io::Cursor::new(b"hello after stop\r\n"), tx);
+        assert!(
+            matches!(next.pty_readable(registry), ReadOutcome::Continue),
+            "another Session's stop or panic must not turn pending output into EOF"
+        );
+        match rx.try_recv().expect("output reaches the journal writer") {
+            JournalMsg::Chunk { data, .. } => assert_eq!(data, b"hello after stop\r\n"),
+            _ => panic!("expected journal output"),
+        }
+    }
+
+    #[test]
+    fn stopped_session_drain_preserves_other_sessions_output() {
+        struct WouldBlock;
+        impl Read for WouldBlock {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+        }
+
+        let mut registry = Registry::new().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let (mut stopped, _dir) = session_with_reader(WouldBlock, tx);
+        stopped.shared.running.store(false, Ordering::Relaxed);
+        assert!(matches!(
+            stopped.drain_after_stop(&mut registry),
+            ReadOutcome::Ended
+        ));
+        assert_next_session_journals(&mut registry);
+    }
+
+    #[test]
+    fn panicking_session_read_preserves_other_sessions_output() {
+        struct PanickingReader;
+        impl Read for PanickingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                panic!("injected Session read panic");
+            }
+        }
+
+        let mut registry = Registry::new().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let (mut panicking, _dir) = session_with_reader(PanickingReader, tx);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panicking.pty_readable(&mut registry)
+        }));
+        assert!(result.is_err());
+        assert_next_session_journals(&mut registry);
     }
 
     #[test]

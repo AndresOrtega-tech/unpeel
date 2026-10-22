@@ -441,13 +441,13 @@ impl SessionIo {
             return ReadOutcome::Ended;
         }
         // One read buffer for the whole reactor (it never reads two PTYs at
-        // once), so an idle Session holds no 64 KiB of its own.
-        let mut scratch = std::mem::take(&mut registry.scratch);
-        let read = self.pty_reader.read(&mut scratch);
-        let outcome = match read {
+        // once). Keep it in the registry so a Session's early return or
+        // panic cannot leave every later read with an empty buffer.
+        let read = self.pty_reader.read(&mut registry.scratch);
+        match read {
             Ok(0) => ReadOutcome::Ended,
             Ok(n) => {
-                self.process_pty_bytes(&scratch[..n]);
+                self.process_pty_bytes(&registry.scratch[..n]);
                 self.apply_journal_backpressure(registry);
                 ReadOutcome::Continue
             }
@@ -469,9 +469,7 @@ impl SessionIo {
                 ));
                 ReadOutcome::Ended
             }
-        };
-        registry.scratch = scratch;
-        outcome
+        }
     }
 
     /// After Kill: drain whatever termination output is still buffered, then

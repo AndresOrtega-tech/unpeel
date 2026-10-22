@@ -115,6 +115,10 @@ to three core-wide services in `session_host::core_reactor` and
   drop still apply) and never blocks anyone. Each Session callback runs
   under `catch_unwind`: a panic ends that Session (exited manifest, error to
   its owner) and the reactor keeps serving the rest.
+  The shared PTY read buffer stays owned by the reactor during every read;
+  a Session's stop or panic must not discard it. Reading another Session
+  into an empty buffer would falsely look like EOF and end that Session
+  without journaling its output.
 - **One timer thread** (`core-timer`) running every Session's heartbeat,
   menu/screen scan, and runtime-observer jobs with the released cadences;
   one Session's jobs still run strictly sequentially.
