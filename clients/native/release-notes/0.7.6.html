@@ -1,0 +1,5 @@
+<h2>Unpeel 0.7.6</h2>
+<ul>
+  <li><b>More reliable terminals.</b> Fixed a Host bug where stopping one session could prevent other sessions in the same workspace from reading or saving terminal output. New sessions could exit immediately with empty scrollback and show a Ghostty launch error until the Host was restarted.</li>
+  <li><b>Session failures stay isolated.</b> A panic while reading one session no longer discards the shared buffer that other sessions need to keep working.</li>
+</ul>
