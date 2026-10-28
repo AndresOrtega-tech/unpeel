@@ -21,10 +21,9 @@ use std::sync::{Mutex, OnceLock};
 const DEFAULT_VIEWPORT_REPLAY_MAX_BYTES: usize = 512 * 1024;
 const MAX_VIEWPORT_REPLAY_MAX_BYTES: usize = 4 * 1024 * 1024;
 
-/// Scrollback page-storage budget per virtual terminal. ghostty's
-/// `max_scrollback` is in **bytes** (rounded up to page granularity; the
-/// header comment saying "lines" is an upstream doc bug — see
-/// `Screen.zig`), so this bounds memory directly. Replaces the old
+/// Scrollback page-storage budget per virtual terminal, set through
+/// `GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES` (bytes, pruned at page
+/// granularity), so this bounds memory directly. Replaces the old
 /// parser's 2000-row cap; at typical widths this retains a few hundred to a
 /// couple of thousand rows of history.
 ///
@@ -402,17 +401,21 @@ impl VtTerminal {
     fn with_scrollback(cols: u16, rows: u16, max_scrollback: usize) -> Self {
         let cols = cols.max(1);
         let rows = rows.max(1);
-        let options = vt::GhosttyTerminalOptions {
-            cols,
-            rows,
-            max_scrollback,
-        };
         unsafe {
             let mut term: vt::GhosttyTerminal = std::ptr::null_mut();
             assert_eq!(
-                vt::ghostty_terminal_new(std::ptr::null(), &mut term, options),
+                vt::ghostty_terminal_new(std::ptr::null(), &mut term, cols, rows),
                 vt::GHOSTTY_SUCCESS,
                 "libghostty-vt terminal allocation failed"
+            );
+            assert_eq!(
+                vt::ghostty_terminal_set(
+                    term,
+                    vt::GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+                    &max_scrollback as *const usize as *const _,
+                ),
+                vt::GHOSTTY_SUCCESS,
+                "libghostty-vt scrollback budget rejected"
             );
             Self {
                 term,
@@ -472,26 +475,31 @@ impl VtTerminal {
     /// work-in-progress. Ghostty tracks the mode; unknown-mode errors read
     /// as false.
     fn synchronized_output(&self) -> bool {
-        let mut value = false;
-        let rc = unsafe { vt::ghostty_terminal_mode_get(self.term, 2026, &mut value) };
-        rc == vt::GHOSTTY_SUCCESS && value
+        self.mode(2026)
     }
 
     /// DEC mouse tracking modes. Encoding modes such as 1006 only describe
     /// reports; one of these tracking modes must be active for the child to
     /// own button gestures.
     fn mouse_reporting(&self) -> bool {
-        [9, 1000, 1002, 1003].into_iter().any(|mode| {
-            let mut value = false;
-            let rc = unsafe { vt::ghostty_terminal_mode_get(self.term, mode, &mut value) };
-            rc == vt::GHOSTTY_SUCCESS && value
-        })
+        [9, 1000, 1002, 1003].into_iter().any(|mode| self.mode(mode))
     }
 
+    /// A DEC private mode by its raw number; unknown-mode errors read as
+    /// false.
     fn mode(&self, mode: u16) -> bool {
-        let mut value = false;
-        let rc = unsafe { vt::ghostty_terminal_mode_get(self.term, mode, &mut value) };
-        rc == vt::GHOSTTY_SUCCESS && value
+        let mut config = vt::GhosttyTerminalModeConfig {
+            mode: vt::ghostty_mode_new(mode, false),
+            value: false,
+        };
+        let rc = unsafe {
+            vt::ghostty_terminal_get(
+                self.term,
+                vt::GHOSTTY_TERMINAL_DATA_MODE,
+                &mut config as *mut vt::GhosttyTerminalModeConfig as *mut _,
+            )
+        };
+        rc == vt::GHOSTTY_SUCCESS && config.value
     }
 
     #[cfg(test)]
@@ -2984,7 +2992,12 @@ mod snapshot_vt_tests {
         let (offset, snapshot) = state.snapshot_vt();
         assert_eq!(offset, 1_003);
         assert_eq!((snapshot.cols, snapshot.rows), (20, 5));
-        assert!(snapshot.bytes.starts_with(b"abc"));
+        // Tabstops are re-established before the content, which starts at home.
+        assert!(
+            snapshot.bytes.windows(6).any(|w| w == b"\x1b[Habc"),
+            "{:?}",
+            String::from_utf8_lossy(&snapshot.bytes)
+        );
         assert!(snapshot.bytes.ends_with(b"\x1b[1;4H"));
         let json = serde_json::to_string(&snapshot).unwrap();
         let back: SnapshotVt = serde_json::from_str(&json).unwrap();

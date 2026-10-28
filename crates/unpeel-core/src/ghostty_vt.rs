@@ -171,8 +171,9 @@ pub struct GhosttyFormatterTerminalOptions {
 
 impl GhosttyFormatterTerminalOptions {
     /// Options that reconstruct the active screen as VT bytes on a fresh
-    /// terminal: content with per-cell styles, then modes, scrolling region,
-    /// tabstops, keyboard flags, charsets, the cursor pen, and the cursor.
+    /// terminal: content with per-cell styles plus modes, scrolling region,
+    /// tabstops, keyboard flags, charsets, the cursor pen, and the cursor
+    /// (the formatter owns the ordering; the cursor always comes last).
     /// The palette and OSC 7 are deliberately NOT emitted — the client
     /// terminal's theme and cwd are its own.
     pub fn vt_state_snapshot() -> Self {
@@ -204,11 +205,28 @@ impl GhosttyFormatterTerminalOptions {
     }
 }
 
+// GhosttyTerminalOption (ghostty_terminal_set keys).
+/// Scrollback page-storage budget in bytes (`size_t*`); pruned at page
+/// granularity. Zero disables scrollback.
+pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES: c_int = 27;
+
+/// Packed mode id (`typedef uint16_t GhosttyMode`): the numeric value in the
+/// low 15 bits, the ANSI flag in the top bit (clear for DEC private modes).
+pub type GhosttyMode = u16;
+
+/// `ghostty_mode_new` is a static inline in `modes.h`, so it is not exported
+/// from the archive.
+pub const fn ghostty_mode_new(value: u16, ansi: bool) -> GhosttyMode {
+    (value & 0x7FFF) | ((ansi as u16) << 15)
+}
+
+/// In/out parameter for `GHOSTTY_TERMINAL_DATA_MODE`: set `mode`, read
+/// `value` back. Frozen layout upstream.
 #[repr(C)]
-pub struct GhosttyTerminalOptions {
-    pub cols: u16,
-    pub rows: u16,
-    pub max_scrollback: usize,
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GhosttyTerminalModeConfig {
+    pub mode: GhosttyMode,
+    pub value: bool,
 }
 
 // Scroll viewport tagged union.
@@ -222,6 +240,7 @@ pub const GHOSTTY_SCROLL_VIEWPORT_ROW: c_int = 3;
 pub union GhosttyTerminalScrollViewportValue {
     pub delta: isize,
     pub row: usize,
+    pub delta_prompt: isize,
     pub _padding: [u64; 2],
 }
 
@@ -268,6 +287,7 @@ pub const GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN: c_int = 6;
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE: c_int = 7;
 pub const GHOSTTY_TERMINAL_DATA_TOTAL_ROWS: c_int = 14;
 pub const GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS: c_int = 15;
+pub const GHOSTTY_TERMINAL_DATA_MODE: c_int = 37;
 
 pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
 pub const GHOSTTY_TERMINAL_SCREEN_ALTERNATE: c_int = 1;
@@ -298,7 +318,13 @@ extern "C" {
     pub fn ghostty_terminal_new(
         allocator: *const std::ffi::c_void,
         terminal: *mut GhosttyTerminal,
-        options: GhosttyTerminalOptions,
+        cols: u16,
+        rows: u16,
+    ) -> GhosttyResult;
+    pub fn ghostty_terminal_set(
+        terminal: GhosttyTerminal,
+        option: c_int,
+        value: *const std::ffi::c_void,
     ) -> GhosttyResult;
     pub fn ghostty_terminal_free(terminal: GhosttyTerminal);
     pub fn ghostty_terminal_vt_write(terminal: GhosttyTerminal, data: *const u8, len: usize);
@@ -318,14 +344,6 @@ extern "C" {
         data: c_int,
         out: *mut std::ffi::c_void,
     ) -> GhosttyResult;
-    /// Query a terminal mode ghostty tracks from the fed byte stream. DEC
-    /// private modes use their raw number — 2026 is synchronized output.
-    pub fn ghostty_terminal_mode_get(
-        terminal: GhosttyTerminal,
-        mode: u16,
-        out_value: *mut bool,
-    ) -> GhosttyResult;
-
     pub fn ghostty_render_state_new(
         allocator: *const std::ffi::c_void,
         state: *mut GhosttyRenderState,
@@ -402,7 +420,7 @@ mod tests {
     use super::*;
 
     fn layout(json: &serde_json::Value, name: &str) -> (usize, usize) {
-        let entry = &json[name];
+        let entry = &json["types"][name];
         (
             entry["size"].as_u64().expect("size") as usize,
             entry["align"].as_u64().expect("align") as usize,
@@ -430,9 +448,9 @@ mod tests {
                 std::mem::align_of::<GhosttyStyleColor>(),
             ),
             (
-                "GhosttyTerminalOptions",
-                std::mem::size_of::<GhosttyTerminalOptions>(),
-                std::mem::align_of::<GhosttyTerminalOptions>(),
+                "GhosttyTerminalModeConfig",
+                std::mem::size_of::<GhosttyTerminalModeConfig>(),
+                std::mem::align_of::<GhosttyTerminalModeConfig>(),
             ),
             (
                 "GhosttyTerminalScrollViewport",

@@ -31,10 +31,9 @@ cargo run --quiet --locked --manifest-path crates/Cargo.toml -p unpeel-license-n
 libghostty-vt, the standalone terminal-emulation library from
 [Ghostty](https://github.com/ghostty-org/ghostty) (MIT; the license text is
 `crates/unpeel-core/vendor/ghostty-vt/LICENSE`). Built from ghostty commit
-`2da015cd6ac06cedc89e09756e895d2c1715205d` with two small Unpeel patches
-applied at build time (`patches/0001-unpeel-small-pages.patch`,
-`patches/0002-unpeel-pack-page-metadata.patch`; rationale and the rebuild
-recipe in the directory's `README.md`). The Host uses it to parse PTY output
+`6ba144158577d033ccb6ed4b574e4013957c9161` with one small Unpeel patch
+applied at build time (`patches/0001-unpeel-small-pages.patch`; rationale
+and the rebuild recipe in the directory's `README.md`). The Host uses it to parse PTY output
 with the exact engine that renders terminals on desktop and phone.
 
 ## Fetched at runtime: agent-browser (Apache-2.0)

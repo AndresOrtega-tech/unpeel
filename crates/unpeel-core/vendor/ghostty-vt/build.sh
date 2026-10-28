@@ -32,11 +32,14 @@ if [ ! -d "$GHOSTTY_SRC" ] || [ ! -f "$GHOSTTY_SRC/build.zig" ]; then
     exit 1
 fi
 
-ZIG="${ZIG:-/opt/homebrew/opt/zig@0.15/bin/zig}"
+# ghostty's build.zig enforces its own minimum_zig_version (0.17.0 at the
+# pinned commit); the ziglang.org release tarball links fine on macOS 26.
+ZIG="${ZIG:-zig}"
 if ! "$ZIG" version >/dev/null 2>&1; then
-    echo "[-] zig not found at $ZIG (brew install zig@0.15)" >&2
+    echo "[-] zig not found at $ZIG (set ZIG=/path/to/zig-0.17)" >&2
     exit 1
 fi
+ZIG="$(command -v "$ZIG")"
 
 echo "[*] zig: $("$ZIG" version) building lib-vt from $GHOSTTY_SRC"
 

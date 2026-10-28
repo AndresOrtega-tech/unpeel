@@ -25,7 +25,7 @@ Key modules:
   it for MCP, desktop copy, and phone views.
 - `terminal_viewport.rs` + `ghostty_vt.rs` — host-side screen reads backed by
   the vendored libghostty-vt (`vendor/ghostty-vt/`, same VT engine the
-  renderers use; note: ghostty's `max_scrollback` is bytes, not lines).
+  renderers use; the scrollback budget is in bytes, not lines).
 - `state.rs` / `state_bus.rs` — shared on-disk app state (`app-state.json`)
   and the cross-frontend change-announcement bus; every shared-state write
   must announce.
